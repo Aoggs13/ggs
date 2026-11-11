@@ -1,0 +1,9 @@
+{
+  "name": "site-mirror",
+  "private": true,
+  "type": "module",
+  "description": "One-off tool that copies the published sulba.site files into this repository",
+  "dependencies": {
+    "playwright": "1.56.1"
+  }
+}
