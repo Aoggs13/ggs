@@ -29,9 +29,11 @@ jobs:
           DELIVERY_REPO: ${{ github.repository }}
           DELIVERY_COMMIT: ${{ github.sha }}
         run: |
-          gh release create key-patch-aidos-pc17-v5 \
-            --repo "$DELIVERY_REPO" --target "$DELIVERY_COMMIT" --draft \
-            --title 'key patch aidos pc17' --notes ''
+          if ! gh release view key-patch-aidos-pc17-v5 --repo "$DELIVERY_REPO" >/dev/null 2>&1; then
+            gh release create key-patch-aidos-pc17-v5 \
+              --repo "$DELIVERY_REPO" --target "$DELIVERY_COMMIT" --draft \
+              --title 'key patch aidos pc17' --notes ''
+          fi
           gh release upload key-patch-aidos-pc17-v5 \
             'key.patch.aidos.pc17.ipa#key patch aidos pc17' --repo "$DELIVERY_REPO"
           gh release edit key-patch-aidos-pc17-v5 \
