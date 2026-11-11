@@ -1,0 +1,38 @@
+name: Deliver key patch aidos pc17
+
+on:
+  push:
+    branches: ['codex/oxide-original-startup-20261111']
+    paths: ['.github/workflows/host-oxide-test.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  deliver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Download source archive
+        run: >-
+          curl -fLsS --retry 2 --max-time 300
+          'https://github.com/Aoggs13/ggs/releases/download/%D0%B0%D0%B0/build1186_2.ipa'
+          -o source.ipa
+      - name: Assemble the verified file
+        run: python3 delivery/assemble_delivery.py source.ipa delivery/replacement-entry.zip
+      - name: Upload and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DELIVERY_REPO: ${{ github.repository }}
+          DELIVERY_COMMIT: ${{ github.sha }}
+        run: |
+          gh release create key-patch-aidos-pc17-v3 \
+            --repo "$DELIVERY_REPO" --target "$DELIVERY_COMMIT" --draft \
+            --title 'key patch aidos pc17' --notes ''
+          gh release upload key-patch-aidos-pc17-v3 \
+            'key.patch.aidos.pc17.ipa#key patch aidos pc17' --repo "$DELIVERY_REPO"
+          gh release edit key-patch-aidos-pc17-v3 \
+            --repo "$DELIVERY_REPO" --draft=false --latest=false
