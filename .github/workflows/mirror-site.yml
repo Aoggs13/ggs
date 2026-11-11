@@ -1,0 +1,77 @@
+name: Mirror sulba.site
+
+# Copies the published sulba.site files into the "mirror" branch of this
+# repository, together with a report of what was and was not downloaded.
+
+on:
+  push:
+    branches: [sulba-site-tools]
+    paths:
+      - '.github/workflows/mirror-site.yml'
+      - 'tools/mirror/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-site
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SITE_ORIGIN: https://sulba.site
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Prepare output folders
+        run: |
+          mkdir -p out/site out/report
+          date -u +"started %Y-%m-%dT%H:%M:%SZ, run ${GITHUB_RUN_ID}, commit ${GITHUB_SHA}" > out/report/run.txt
+          curl -sS -m 60 -o /dev/null -D out/report/root-headers.txt "$SITE_ORIGIN/" || echo "curl failed with $?" >> out/report/run.txt
+
+      - name: Static crawl
+        continue-on-error: true
+        run: node tools/mirror/mirror.mjs --origin "$SITE_ORIGIN" --out out/site --report out/report 2>&1 | tee out/report/crawl-1.log
+
+      - name: Browser discovery
+        continue-on-error: true
+        timeout-minutes: 25
+        working-directory: tools/mirror
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          node discover.mjs --origin "$SITE_ORIGIN" --out ../../out/report/discovered.json --shots ../../out/report/shots 2>&1 | tee ../../out/report/discover.log
+
+      - name: Fetch files found by the browser
+        continue-on-error: true
+        run: node tools/mirror/mirror.mjs --origin "$SITE_ORIGIN" --out out/site --report out/report --extra out/report/discovered.json 2>&1 | tee out/report/crawl-2.log
+
+      - name: Publish the mirror branch
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p out/site out/report
+          date -u +"finished %Y-%m-%dT%H:%M:%SZ" >> out/report/run.txt
+          # GitHub rejects files over 100 MB: list them instead of committing them
+          find out -type f -size +95M -printf '%s %p\n' > out/report/too-large.txt
+          find out -type f -size +95M -delete
+          cd out
+          git init -q -b mirror
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Mirror of ${SITE_ORIGIN} ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" mirror
