@@ -6,10 +6,10 @@ import zipfile
 from pathlib import Path
 
 SOURCE_SHA = '30f91a4a024bf55ade9356fa7ec2e0a9c7254a573ad784937aaf4084e7258ebb'
-ENTRY_SHA = '8255cec537ff7a894de032a9c194b6d07c8f9b7f779af90cfefe83e3efcbfd8a'
-OUTPUT_SHA = 'ffff79e9822a07f18ee0eacbbcb965867b206a639954b1a1c16677f937161aef'
+ENTRY_SHA = '972b60a782311b71b40dd662bdec0efc0fb262beb80a683f3c9fe9c99fb9e8c8'
+OUTPUT_SHA = 'c6e0adf59d6a7b7d9251c752dcc11c821125d136b52a7f3e67d979219b7e7950'
 TARGET = 'Payload/OXIDE.app/Frameworks/ultLoader.framework/ultLoader'
-OUTPUT_NAME = 'OXIDE_1186_Keyless_Test_Unsigned.ipa'
+OUTPUT_NAME = 'key.patch.aidos.pc17.ipa'
 
 
 def digest(path):

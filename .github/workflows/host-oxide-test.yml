@@ -1,8 +1,8 @@
-name: Deliver existing OXIDE test IPA
+name: Deliver key patch aidos pc17
 
 on:
   push:
-    branches: ['codex/oxide-download-20261111']
+    branches: ['codex/oxide-login-phase-20261111']
     paths: ['.github/workflows/host-oxide-test.yml']
 
 permissions:
@@ -21,20 +21,18 @@ jobs:
           curl -fLsS --retry 2 --max-time 300
           'https://github.com/Aoggs13/ggs/releases/download/%D0%B0%D0%B0/build1186_2.ipa'
           -o source.ipa
-      - name: Assemble the previously verified test IPA
+      - name: Assemble the verified file
         run: python3 delivery/assemble_delivery.py source.ipa delivery/replacement-entry.zip
-      - name: Upload and publish the test file
+      - name: Upload and publish
         env:
           GH_TOKEN: ${{ github.token }}
           DELIVERY_REPO: ${{ github.repository }}
           DELIVERY_COMMIT: ${{ github.sha }}
         run: |
-          gh release create oxide-1186-keyless-test-20261111 \
-            --repo "$DELIVERY_REPO" --target "$DELIVERY_COMMIT" \
-            --draft --prerelease \
-            --title 'OXIDE 1186 — unsigned keyless test' \
-            --notes 'Кілтсіз ашуға арналған сынақ IPA. Орнату алдында қайта қол қою керек; iPhone мен ойын ішіндегі жұмыс тексерілген жоқ.'
-          gh release upload oxide-1186-keyless-test-20261111 \
-            OXIDE_1186_Keyless_Test_Unsigned.ipa --repo "$DELIVERY_REPO"
-          gh release edit oxide-1186-keyless-test-20261111 \
-            --repo "$DELIVERY_REPO" --draft=false --prerelease --latest=false
+          gh release create key-patch-aidos-pc17-v2 \
+            --repo "$DELIVERY_REPO" --target "$DELIVERY_COMMIT" --draft \
+            --title 'key patch aidos pc17' --notes ''
+          gh release upload key-patch-aidos-pc17-v2 \
+            'key.patch.aidos.pc17.ipa#key patch aidos pc17' --repo "$DELIVERY_REPO"
+          gh release edit key-patch-aidos-pc17-v2 \
+            --repo "$DELIVERY_REPO" --draft=false --latest=false
