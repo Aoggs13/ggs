@@ -1,0 +1,36 @@
+name: Mirror exact OXIDE F2 IPA
+
+on:
+  push:
+    branches: ['codex/mirror-f2-20261112']
+    paths: ['.github/workflows/mirror-f2.yml', 'delivery/mirror_f2.py']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-exact-oxide-f2-20261112
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Download and verify the exact public F2
+        run: |
+          python3 -m venv /tmp/f2-mirror-venv
+          /tmp/f2-mirror-venv/bin/pip install --disable-pip-version-check playwright==1.62.0
+          /tmp/f2-mirror-venv/bin/python delivery/mirror_f2.py
+      - name: Upload the unchanged IPA and publish the diagnostic release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DELIVERY_REPO: ${{ github.repository }}
+        run: |
+          gh release upload oxide-q3-f2-diagnostic-20261112 \
+            OXIDE_Q3_ERROR_DETAILS_F2_RESIGN.ipa SHA256SUMS.txt --repo "$DELIVERY_REPO"
+          gh release edit oxide-q3-f2-diagnostic-20261112 \
+            --repo "$DELIVERY_REPO" --draft=false --prerelease=true --latest=false
