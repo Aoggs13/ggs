@@ -533,97 +533,244 @@ static IMP orig_alertShow = NULL;
         [self.tabButtons addObject:tb];
     }
 
-    // Pages
+    // Pages — scrollable so long feature lists fit
     self.pages = [NSMutableArray array];
     for (NSInteger i = 0; i < 3; i++) {
-        UIView *page = [[UIView alloc] initWithFrame:CGRectMake(0, 95, panel.bounds.size.width, panel.bounds.size.height - 95)];
+        UIScrollView *page = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 95, panel.bounds.size.width, panel.bounds.size.height - 95)];
         page.backgroundColor = [UIColor clearColor];
+        page.showsVerticalScrollIndicator = YES;
+        page.indicatorStyle = UIScrollViewIndicatorStyleWhite;
         page.hidden = YES;
         [panel addSubview:page];
-        [self.pages addObject:page];
+        [self.pages addObject:(UIView *)page];
     }
-    [self buildAimPage:self.pages[0]];
-    [self buildEspPage:self.pages[1]];
-    [self buildSettingsPage:self.pages[2]];
+    [self buildAimPage:(UIScrollView *)self.pages[0]];
+    [self buildEspPage:(UIScrollView *)self.pages[1]];
+    [self buildSettingsPage:(UIScrollView *)self.pages[2]];
 
     [self switchTab:0];
     LOG(@"menu built");
 }
 
-- (void)buildToggleRow:(UIView *)parent y:(CGFloat)y label:(NSString *)label getter:(BOOL (^)(void))getter setter:(void (^)(BOOL))setter {
-    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(10, y, parent.bounds.size.width - 20, 32)];
-    row.backgroundColor = [UIColor colorWithRed:0.1 green:0.12 blue:0.22 alpha:0.5];
+- (UIView *)baseRow:(UIView *)parent y:(CGFloat)y label:(NSString *)label soon:(BOOL)soon {
+    CGFloat width = parent.bounds.size.width - 20;
+    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(10, y, width, 32)];
+    row.backgroundColor = [UIColor colorWithRed:0.1 green:0.12 blue:0.22 alpha:soon ? 0.25 : 0.55];
     row.layer.cornerRadius = 7;
     [parent addSubview:row];
 
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(12, 0, 200, 32)];
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(12, 0, width - 70, 32)];
     lbl.text = label;
-    lbl.font = [UIFont systemFontOfSize:13];
-    lbl.textColor = [UIColor colorWithRed:0.92 green:0.96 blue:1.0 alpha:1.0];
+    lbl.font = [UIFont systemFontOfSize:12.5];
+    lbl.textColor = soon ? [UIColor colorWithWhite:0.55 alpha:1.0]
+                         : [UIColor colorWithRed:0.92 green:0.96 blue:1.0 alpha:1.0];
     [row addSubview:lbl];
+    return row;
+}
 
+- (void)buildToggleRow:(UIView *)parent y:(CGFloat)y label:(NSString *)label soon:(BOOL)soon
+                getter:(BOOL (^)(void))getter setter:(void (^)(BOOL))setter {
+    UIView *row = [self baseRow:parent y:y label:label soon:soon];
     UISwitch *sw = [[UISwitch alloc] init];
     sw.frame = CGRectMake(row.bounds.size.width - 60, 0, 50, 32);
-    sw.transform = CGAffineTransformMakeScale(0.75, 0.75);
+    sw.transform = CGAffineTransformMakeScale(0.72, 0.72);
     sw.on = getter();
+    sw.enabled = !soon;
     sw.onTintColor = [UIColor colorWithRed:0.3 green:1.0 blue:0.5 alpha:1.0];
-    [sw addTarget:[self.class blockHolder:^(UISwitch *s) {
-        setter(s.on);
-    }] action:@selector(invoke:) forControlEvents:UIControlEventValueChanged];
+    [sw addTarget:[self.class blockHolder:^(UISwitch *s) { setter(s.on); }]
+           action:@selector(invoke:)
+ forControlEvents:UIControlEventValueChanged];
     [row addSubview:sw];
 }
 
-- (void)buildAimPage:(UIView *)page {
+- (void)buildToggleRow:(UIView *)parent y:(CGFloat)y label:(NSString *)label
+                getter:(BOOL (^)(void))getter setter:(void (^)(BOOL))setter {
+    [self buildToggleRow:parent y:y label:label soon:NO getter:getter setter:setter];
+}
+
+- (void)buildSliderRow:(UIView *)parent y:(CGFloat)y label:(NSString *)label
+                   min:(float)minV max:(float)maxV value:(float)value
+                setter:(void (^)(float))setter soon:(BOOL)soon {
+    UIView *row = [self baseRow:parent y:y label:label soon:soon];
+    row.frame = CGRectMake(10, y, parent.bounds.size.width - 20, 32);
+    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(row.bounds.size.width - 150, 2, 140, 28)];
+    sl.minimumValue = minV;
+    sl.maximumValue = maxV;
+    sl.value = value;
+    sl.enabled = !soon;
+    sl.minimumTrackTintColor = [UIColor colorWithRed:0.4 green:0.6 blue:1.0 alpha:1.0];
+    [sl addTarget:[self.class blockHolder:^(UISlider *s) { setter(s.value); }]
+           action:@selector(invoke:)
+ forControlEvents:UIControlEventValueChanged];
+    [row addSubview:sl];
+}
+
+- (void)buildButtonRow:(UIView *)parent y:(CGFloat)y label:(NSString *)label
+             btnLabel:(NSString *)btnLabel soon:(BOOL)soon action:(void (^)(void))action {
+    UIView *row = [self baseRow:parent y:y label:label soon:soon];
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+    btn.frame = CGRectMake(row.bounds.size.width - 70, 4, 60, 24);
+    btn.backgroundColor = soon ? [UIColor colorWithWhite:0.3 alpha:0.6]
+                               : [UIColor colorWithRed:0.35 green:0.5 blue:1.0 alpha:1.0];
+    btn.layer.cornerRadius = 5;
+    [btn setTitle:btnLabel forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+    [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    btn.enabled = !soon;
+    [btn addTarget:[self.class blockHolder:^(UIButton *b) { action(); }]
+            action:@selector(invoke:)
+  forControlEvents:UIControlEventTouchUpInside];
+    [row addSubview:btn];
+}
+
+- (void)buildAimPage:(UIScrollView *)page {
     CGFloat y = 4;
     __weak typeof(self) wself = self;
-    [self buildToggleRow:page y:y label:@"Aimbot (silent) · SOON"
+
+    [self buildToggleRow:page y:y label:@"Aimbot (silent) · SOON" soon:YES
                   getter:^BOOL{ return CFG.aimOn; }
                   setter:^(BOOL v){ CFG.aimOn = v; [wself refreshHooks]; }];
     y += 38;
-    [self buildToggleRow:page y:y label:@"No Recoil · SOON"
+    [self buildButtonRow:page y:y label:@"Mode" btnLabel:@"silent" soon:YES action:^{}];
+    y += 38;
+    [self buildSliderRow:page y:y label:@"FOV (0-367°)"
+                     min:0 max:367 value:CFG.fovDeg
+                  setter:^(float v){ CFG.fovDeg = v; } soon:YES];
+    y += 38;
+    [self buildSliderRow:page y:y label:@"Smoothing"
+                     min:0 max:0.95 value:CFG.smoothing
+                  setter:^(float v){ CFG.smoothing = v; } soon:YES];
+    y += 38;
+    [self buildSliderRow:page y:y label:@"Accuracy cap %"
+                     min:0.10 max:1.0 value:CFG.accuracyCap
+                  setter:^(float v){ CFG.accuracyCap = v; } soon:YES];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"No indicator" soon:YES
+                  getter:^BOOL{ return YES; } setter:^(BOOL v){}];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Predict shot" soon:YES
+                  getter:^BOOL{ return YES; } setter:^(BOOL v){}];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"No Recoil · SOON" soon:YES
                   getter:^BOOL{ return CFG.noRecoil; }
                   setter:^(BOOL v){ CFG.noRecoil = v; [wself refreshHooks]; }];
     y += 38;
-    [self buildToggleRow:page y:y label:@"No Spread · SOON"
+    [self buildToggleRow:page y:y label:@"No Spread · SOON" soon:YES
                   getter:^BOOL{ return CFG.noSpread; }
                   setter:^(BOOL v){ CFG.noSpread = v; [wself refreshHooks]; }];
     y += 38;
-    [self buildToggleRow:page y:y label:@"Humanize (anti-shadowban)"
+    [self buildToggleRow:page y:y label:@"No Bullet Drop · SOON" soon:YES
+                  getter:^BOOL{ return NO; } setter:^(BOOL v){}];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Humanize (anti-shadowban)" soon:NO
                   getter:^BOOL{ return CFG.humanize; }
                   setter:^(BOOL v){ CFG.humanize = v; }];
+    y += 38;
+
+    page.contentSize = CGSizeMake(page.bounds.size.width, y + 10);
 }
 
-- (void)buildEspPage:(UIView *)page {
+- (void)buildEspPage:(UIScrollView *)page {
+    CGFloat y = 4;
     __weak typeof(self) wself = self;
-    [self buildToggleRow:page y:4 label:@"ESP master · SOON"
+
+    [self buildToggleRow:page y:y label:@"ESP master · SOON" soon:YES
                   getter:^BOOL{ return CFG.espOn; }
                   setter:^(BOOL v){ CFG.espOn = v; [wself refreshHooks]; }];
+    y += 38;
+    for (NSString *nm in @[@"Box", @"Name", @"HP bar", @"Distance",
+                           @"Bone lines", @"Skeleton", @"Team check"]) {
+        [self buildToggleRow:page y:y label:[NSString stringWithFormat:@"%@ · SOON", nm] soon:YES
+                      getter:^BOOL{ return YES; } setter:^(BOOL v){}];
+        y += 38;
+    }
+    [self buildSliderRow:page y:y label:@"Max distance (m)"
+                     min:50 max:800 value:400
+                  setter:^(float v){} soon:YES];
+    y += 38;
+
+    page.contentSize = CGSizeMake(page.bounds.size.width, y + 10);
 }
 
-- (void)buildSettingsPage:(UIView *)page {
+- (void)buildSettingsPage:(UIScrollView *)page {
+    CGFloat y = 4;
     __weak typeof(self) wself = self;
-    [self buildToggleRow:page y:4 label:@"Anti-Ban Auto-Stub"
+
+    [self buildSliderRow:page y:y label:@"Menu hue (0-360)"
+                     min:0 max:360 value:CFG.menuHue
+                  setter:^(float v){ CFG.menuHue = (int)v; [wself reskin]; } soon:NO];
+    y += 38;
+    [self buildButtonRow:page y:y label:@"ESP color" btnLabel:@"cyc" soon:YES action:^{
+        CFG.espColor = (CFG.espColor + 1) % 5;
+    }];
+    y += 38;
+    [self buildSliderRow:page y:y label:@"Opacity %"
+                     min:30 max:100 value:CFG.opacity * 100
+                  setter:^(float v){ CFG.opacity = v / 100.0; [wself reskin]; } soon:NO];
+    y += 42;
+
+    // === ANTI-BAN (all ACTIVE) ===
+    [self buildToggleRow:page y:y label:@"Anti-Ban Auto-Stub"
                   getter:^BOOL{ return CFG.antiBanStub; }
-                  setter:^(BOOL v){ CFG.antiBanStub = v; [wself refreshHooks]; }];
-    [self buildToggleRow:page y:42 label:@"Kill DataDome / AppsFlyer JB probes"
+                  setter:^(BOOL v){ CFG.antiBanStub = v; if (v) [wself refreshHooks]; }];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Kill DataDome / AppsFlyer"
                   getter:^BOOL{ return CFG.hideJB; }
                   setter:^(BOOL v){
                       CFG.hideJB = v;
-                      if (v) { patch_datadome(); patch_appsflyer(); }
+                      if (v) { patch_datadome(); patch_appsflyer(); auto_stub_security_classes(); }
                   }];
-    [self buildToggleRow:page y:80 label:@"Telemetry block (shadow-ban)"
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Hide JB probes · SOON" soon:YES
+                  getter:^BOOL{ return YES; } setter:^(BOOL v){}];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Capture ban code · SOON" soon:YES
+                  getter:^BOOL{ return NO; } setter:^(BOOL v){}];
+    y += 42;
+
+    // === SHADOW-BAN GUARD ===
+    [self buildToggleRow:page y:y label:@"Anti-Shadowban"
+                  getter:^BOOL{ return CFG.humanize; }
+                  setter:^(BOOL v){ CFG.humanize = v; }];
+    y += 38;
+    [self buildSliderRow:page y:y label:@"Miss rate %" min:0 max:50 value:15
+                  setter:^(float v){} soon:YES];
+    y += 38;
+    [self buildSliderRow:page y:y label:@"Reaction ms" min:0 max:400 value:95
+                  setter:^(float v){} soon:YES];
+    y += 38;
+    [self buildSliderRow:page y:y label:@"Aim jitter °" min:0 max:5 value:1.8
+                  setter:^(float v){} soon:YES];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Telemetry block"
                   getter:^BOOL{ return CFG.telemetryBlock; }
                   setter:^(BOOL v){ CFG.telemetryBlock = v; [wself refreshHooks]; }];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Report immunity · SOON" soon:YES
+                  getter:^BOOL{ return NO; } setter:^(BOOL v){}];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"FP rotate on boot · SOON" soon:YES
+                  getter:^BOOL{ return NO; } setter:^(BOOL v){}];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Pool detect · SOON" soon:YES
+                  getter:^BOOL{ return NO; } setter:^(BOOL v){}];
+    y += 38;
+    [self buildButtonRow:page y:y label:@"Queue dodge · SOON" btnLabel:@"RUN" soon:YES action:^{}];
+    y += 42;
 
-    UIButton *guestBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    guestBtn.frame = CGRectMake(10, 122, page.bounds.size.width - 20, 32);
-    guestBtn.backgroundColor = [UIColor colorWithRed:0.35 green:0.5 blue:1.0 alpha:1.0];
-    [guestBtn setTitle:@"Guest Reset (RUN)" forState:UIControlStateNormal];
-    [guestBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    guestBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-    guestBtn.layer.cornerRadius = 7;
-    [guestBtn addTarget:self action:@selector(runGuestReset) forControlEvents:UIControlEventTouchUpInside];
-    [page addSubview:guestBtn];
+    // === MISC ===
+    [self buildToggleRow:page y:y label:@"Auto Headshot · SOON" soon:YES
+                  getter:^BOOL{ return NO; } setter:^(BOOL v){}];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Instant Hit · SOON" soon:YES
+                  getter:^BOOL{ return NO; } setter:^(BOOL v){}];
+    y += 38;
+    [self buildButtonRow:page y:y label:@"Guest Reset" btnLabel:@"RUN" soon:NO action:^{
+        [wself runGuestReset];
+    }];
+    y += 42;
+
+    page.contentSize = CGSizeMake(page.bounds.size.width, y + 10);
 }
 
 - (void)runGuestReset {
