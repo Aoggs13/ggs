@@ -381,6 +381,11 @@ static int il2_patch_infinite_ammo(void) {
         true, "infAmmo");
 }
 
+static int il2_patch_matching_true(const char *imageName,
+                                   NSRegularExpression *classRx,
+                                   NSRegularExpression *methodRx,
+                                   const char *tag);  // forward decl, defined below
+
 static int il2_patch_always_sprint(void) {
     return il2_patch_matching_true("Assembly-CSharp.dll",
         rx(@"(Player.*|.*Movement.*|.*Character.*|.*Motor.*|.*Sprint.*)"),
