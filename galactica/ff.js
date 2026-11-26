@@ -44,6 +44,17 @@ const CFG = {
         hideJB: true,
         killDataDome: true,
     },
+    shadow: {
+        humanize: true,          // жасанды мисс, reaction delay, аccuracy jitter — shadow-queue-дан қашу
+        missRate: 0.15,          // 15% шотты әдейі жібереміз
+        reactionMs: 95,          // snap алдында 60-130 мс кідіріс
+        aimJitter: 1.8,          // +-1.8° микрокөрсеткіш (адамша діріл)
+        fingerprintRotate: true, // әр сессия басында IDFV/keychain рандомизация
+        telemetryBlock: true,    // behavior-telemetry upload-тарын кесу
+        reportImmune: true,      // басқалар бізді репортта → swallow
+        poolDetect: true,        // чит-poolда отырғанды сезіп, дабыл
+        queueDodge: true,        // matchmaker cookie-ларын тазартып, жаңа queue-ға кіру
+    },
     misc: {
         teleportSafe: false,
         godFov: false,
@@ -66,11 +77,24 @@ const MENU = {
 const LOG = (...a) => console.log("[Galactica]", ...a);
 const hookedSet = new Set();
 const hookedBan = new Set();
+const hookedShadow = new Set();
+const reactionMap = Object.create(null);
+let MY_UID = null;
+let POOL_SUSPECT_COUNT = 0;
 
 Il2Cpp.perform(() => {
-    const asm       = Il2Cpp.domain.assembly("Assembly-CSharp").image;
-    const uCore     = Il2Cpp.domain.assembly("UnityEngine.CoreModule").image;
-    const uUI       = Il2Cpp.domain.assembly("UnityEngine.UI").image;
+    // outer safety — if anything throws at init we log and continue; don't bring down the game
+    let asm, uCore, uUI;
+    try {
+        asm   = Il2Cpp.domain.assembly("Assembly-CSharp").image;
+        uCore = Il2Cpp.domain.assembly("UnityEngine.CoreModule").image;
+        uUI   = Il2Cpp.domain.assembly("UnityEngine.UI").image;
+    } catch (e) {
+        LOG("critical: assemblies not ready, retrying on next tick:", e);
+        setTimeout(() => Il2Cpp.perform(() => { try { main(); } catch (_) {} }), 1500);
+        return;
+    }
+    if (!asm || !uCore) { LOG("assemblies missing"); return; }
 
     const GameObject   = uCore.class("UnityEngine.GameObject");
     const Transform    = uCore.class("UnityEngine.Transform");
@@ -329,6 +353,17 @@ Il2Cpp.perform(() => {
         rows.push(row(page, y -= 40,  "Kill DataDome",     "toggle", () => CFG.antiban.killDataDome, v => { CFG.antiban.killDataDome = v; if (v) nativeBypass(); }));
         rows.push(row(page, y -= 40,  "Hide JB probes",    "toggle", () => CFG.antiban.hideJB,   v => { CFG.antiban.hideJB = v; if (v) nativeBypass(); }));
         rows.push(row(page, y -= 40,  "Capture ban code",  "toggle", () => CFG.antiban.captureBan, v => { CFG.antiban.captureBan = v; if (v) hookBanCapture(); }));
+        // --- ANTI-SHADOWBAN / BLACKLIST block ---
+        rows.push(row(page, y -= 40,  "Anti-Shadowban",    "toggle", () => CFG.shadow.humanize,  v => { CFG.shadow.humanize = v; if (v) hookWeaponFire(); }));
+        rows.push(row(page, y -= 40,  "Miss rate %",       "slider", () => Math.round(CFG.shadow.missRate*100), v => CFG.shadow.missRate = v/100, { min: 0, max: 50, step: 1 }));
+        rows.push(row(page, y -= 40,  "Reaction ms",       "slider", () => CFG.shadow.reactionMs, v => CFG.shadow.reactionMs = v, { min: 0, max: 400, step: 5 }));
+        rows.push(row(page, y -= 40,  "Aim jitter °",      "slider", () => Math.round(CFG.shadow.aimJitter*10), v => CFG.shadow.aimJitter = v/10, { min: 0, max: 50, step: 1 }));
+        rows.push(row(page, y -= 40,  "Telemetry block",   "toggle", () => CFG.shadow.telemetryBlock, v => { CFG.shadow.telemetryBlock = v; if (v) hookTelemetry(); }));
+        rows.push(row(page, y -= 40,  "Report immunity",   "toggle", () => CFG.shadow.reportImmune,   v => { CFG.shadow.reportImmune = v; if (v) hookReportImmunity(); }));
+        rows.push(row(page, y -= 40,  "FP rotate on boot", "toggle", () => CFG.shadow.fingerprintRotate, v => { CFG.shadow.fingerprintRotate = v; if (v) fingerprintRotate(); }));
+        rows.push(row(page, y -= 40,  "Pool detect",       "toggle", () => CFG.shadow.poolDetect,    v => CFG.shadow.poolDetect = v));
+        rows.push(row(page, y -= 40,  "Queue dodge",       "button", () => "", _ => queueDodge(),   { label: "RUN" }));
+        // --- misc ---
         rows.push(row(page, y -= 40,  "Auto Headshot",     "toggle", () => CFG.misc.autoHeadshot, v => CFG.misc.autoHeadshot = v));
         rows.push(row(page, y -= 40,  "Instant Hit",       "toggle", () => CFG.misc.instantHit,  v => { CFG.misc.instantHit = v; if (v) hookInstantHit(); }));
         rows.push(row(page, y -= 40,  "Guest Reset",       "button", () => "", _ => doGuestReset(), { label: "RUN" }));
@@ -369,8 +404,9 @@ Il2Cpp.perform(() => {
 
     // ====================== per-frame tick ======================
     function tick() {
-        if (!MENU.root) return;
-        const dt = Time_.method("get_deltaTime").invoke();
+        if (!MENU.root || MENU.root.handle.isNull()) return;
+        let dt = 0.033;
+        try { dt = Time_.method("get_deltaTime").invoke(); } catch (_) {}
 
         // starfield
         for (const s of MENU.stars) {
@@ -469,17 +505,25 @@ Il2Cpp.perform(() => {
         }
     }
 
-    // bind tick to Unity's frame
-    Time_.method("get_deltaTime").implementation = function () {
-        const dt = this.method("get_deltaTime").invoke();
-        try { tick(); } catch (e) { LOG("tick", e); }
-        return dt;
+    // tick scheduler — avoid recursive-hook crashes. setInterval on JS thread,
+    // IL2CPP work queued to Unity main thread via Il2Cpp.schedule.
+    const schedSafe = (fn) => {
+        try {
+            if (Il2Cpp.scheduler && Il2Cpp.scheduler.schedule) {
+                Il2Cpp.scheduler.schedule(() => { try { fn(); } catch (e) { LOG("sched", e); } });
+            } else if (Il2Cpp.schedule) {
+                Il2Cpp.schedule(() => { try { fn(); } catch (e) { LOG("sched", e); } });
+            } else {
+                // fallback: run inline, bridge usually attaches thread via perform
+                try { fn(); } catch (e) { LOG("inline", e); }
+            }
+        } catch (e) { LOG("sched-outer", e); }
     };
-    Camera.method("get_main").implementation = function () {
-        const r = this.method("get_main").invoke();
-        try { updateEsp(); } catch (e) { LOG("esp", e); }
-        return r;
-    };
+    // 30 fps menu/animation, 15 fps ESP
+    setInterval(() => schedSafe(tick), 33);
+    setInterval(() => schedSafe(updateEsp), 66);
+    // periodic pool detector
+    setInterval(() => schedSafe(() => { try { if (CFG.shadow.poolDetect) poolDetectPass(); } catch (_) {} }), 4000);
 
     // ====================== WeaponFire auto-patch ======================
     function hookWeaponFire() {
@@ -521,9 +565,18 @@ Il2Cpp.perform(() => {
                     m.implementation = function (...args) {
                         const original = orig.invoke.apply(this, args);
                         if (!CFG.aim.on || CFG.aim.mode !== "silent") return original;
+                        // anti-shadowban: humanize — miss rate + accuracy cap
+                        if (Math.random() > CFG.aim.accuracyCap) return original;
+                        if (CFG.shadow.humanize && Math.random() < CFG.shadow.missRate) return original;
                         const t = findBestTarget();
                         if (!t) return original;
-                        if (Math.random() > CFG.aim.accuracyCap) return original;
+                        // reaction delay — track per-target "first seen" time, skip if too fast
+                        if (CFG.shadow.humanize && CFG.shadow.reactionMs > 0) {
+                            const k = "r_" + t.pc.handle.toString();
+                            const now = Date.now();
+                            if (!reactionMap[k]) { reactionMap[k] = now; return original; }
+                            if (now - reactionMap[k] < CFG.shadow.reactionMs) return original;
+                        }
                         const camT = Camera.method("get_main").invoke().method("get_transform").invoke();
                         const camPos = camT.method("get_position").invoke();
                         let tx = t.pos.x, ty = t.pos.y, tz = t.pos.z;
@@ -533,8 +586,22 @@ Il2Cpp.perform(() => {
                             tx += t.vel.x * bulletTime; ty += t.vel.y * bulletTime; tz += t.vel.z * bulletTime;
                         }
                         const dx = tx - camPos.x, dy = ty - camPos.y, dz = tz - camPos.z;
-                        const len = Math.hypot(dx, dy, dz) || 1;
-                        return v3(dx / len, dy / len, dz / len);
+                        let len = Math.hypot(dx, dy, dz) || 1;
+                        let nx = dx / len, ny = dy / len, nz = dz / len;
+                        // aim jitter — micro-tremor in degrees → vector perturb
+                        if (CFG.shadow.humanize && CFG.shadow.aimJitter > 0) {
+                            const j = CFG.shadow.aimJitter * Math.PI / 180;
+                            const yaw = (Math.random() * 2 - 1) * j;
+                            const pit = (Math.random() * 2 - 1) * j;
+                            // yaw around Y
+                            const cy = Math.cos(yaw), sy = Math.sin(yaw);
+                            const rx = nx * cy + nz * sy, rz = -nx * sy + nz * cy;
+                            // pitch around X
+                            const cp = Math.cos(pit), sp = Math.sin(pit);
+                            const ry = ny * cp - rz * sp, rz2 = ny * sp + rz * cp;
+                            nx = rx; ny = ry; nz = rz2;
+                        }
+                        return v3(nx, ny, nz);
                     };
                     hookedSet.add(key); LOG("silent-aim:", n);
                 } catch (_) {}
@@ -867,33 +934,37 @@ Il2Cpp.perform(() => {
     }
 
     // ====================== native bypass ======================
+    // Only BOOL-return security checks are stubbed. Callbacks that return objects
+    // (NSString/NSDictionary) are left untouched to prevent nil-deref crashes.
     function nativeBypass() {
+        const safeReplaceBoolRet = (klass, sel, where) => {
+            try {
+                const m = klass[sel];
+                if (!m) return;
+                Interceptor.replace(m.implementation,
+                    new NativeCallback(() => 0, "int", ["pointer", "pointer"]));
+                LOG(where + ":" + sel + " → NO");
+            } catch (e) { LOG("replace " + sel, e); }
+        };
         if (CFG.antiban.killDataDome) {
             const DD = ObjC.classes.DataDomeSDK;
             if (DD) {
-                try { Interceptor.replace(DD["- isJailbrokenWithSkipAdvancedJailbreakValidation:"].implementation,
-                    new NativeCallback(() => 0, "int", ["pointer","pointer","int"])); } catch (_) {}
-                try { Interceptor.replace(DD["- isIntegrityEnabled"].implementation,
-                    new NativeCallback(() => 0, "int", ["pointer","pointer"])); } catch (_) {}
+                safeReplaceBoolRet(DD, "- isJailbrokenWithSkipAdvancedJailbreakValidation:", "DD");
+                safeReplaceBoolRet(DD, "- isIntegrityEnabled", "DD");
             }
-            for (const cn of ["AppsFlyerTracker","AppsFlyerLib","AFSDKJailbreakCheck"]) {
+            for (const cn of ["AppsFlyerTracker", "AppsFlyerLib", "AFSDKJailbreakCheck"]) {
                 const c = ObjC.classes[cn]; if (!c) continue;
-                for (const sel of Object.keys(c["$ownMethods"])) {
-                    if (/calculateV2|isJailBroken|isDebuggerAttached|isDevBuild|isSimulator/i.test(sel)) {
-                        try { Interceptor.replace(c[sel].implementation,
-                            new NativeCallback(() => 0, "int", ["pointer","pointer"])); } catch (_) {}
+                try {
+                    for (const sel of Object.keys(c["$ownMethods"])) {
+                        // narrow: only clearly boolean "is*" probes — not "calculate*" methods
+                        // (those return NSString/NSNumber and nil-returning would crash caller)
+                        if (/^- is(JailBroken|DebuggerAttached|DevBuild|Simulator|Jailbroken)[a-zA-Z]*$/i.test(sel)) {
+                            safeReplaceBoolRet(c, sel, "AF");
+                        }
                     }
-                }
+                } catch (_) {}
             }
-            const FB = ObjC.classes.FBSDKIntegrityManager;
-            if (FB) {
-                for (const sel of Object.keys(FB["$ownMethods"])) {
-                    if (/integrity|process/i.test(sel)) {
-                        try { Interceptor.replace(FB[sel].implementation,
-                            new NativeCallback(() => {}, "void", ["pointer","pointer"])); } catch (_) {}
-                    }
-                }
-            }
+            // FBSDKIntegrityManager — left alone (process* returns NSDictionary*, nil-crashes caller)
         }
         if (CFG.antiban.hideJB) {
             const JB = ["/Applications/Cydia.app","/Applications/Sileo.app","/Applications/TrollStore.app",
@@ -938,6 +1009,213 @@ Il2Cpp.perform(() => {
         }
     }
 
+    // ====================== anti-shadowban hooks ======================
+    function hookTelemetry() {
+        if (!CFG.shadow.telemetryBlock) return;
+        // кесетіндер: ReportAnti*, HackerReport*, SendAccuracy*, UploadBehavior*, SendCombatStats*
+        const M_RX = /^(Send|Upload|Post|Flush)(Anti|Hack|Behavior|Combat|Stat|Accuracy|Pattern|Metric)/i;
+        try {
+            asm.classes.forEach(cls => {
+                try {
+                    cls.methods.forEach(m => {
+                        if (!M_RX.test(m.name)) return;
+                        const key = "TEL." + cls.name + "." + m.name;
+                        if (hookedShadow.has(key)) return;
+                        try {
+                            const orig = m;
+                            m.implementation = function () {
+                                if (!CFG.shadow.telemetryBlock) return orig.invoke.apply(this, arguments);
+                                if (m.returnType.name === "System.Boolean") return true;
+                                if (m.returnType.name === "System.Int32") return 0;
+                                if (m.returnType.name === "System.Void") return;
+                                return orig.invoke.apply(this, arguments);
+                            };
+                            hookedShadow.add(key); LOG("telemetry blocked:", cls.name + "." + m.name);
+                        } catch (_) {}
+                    });
+                } catch (_) {}
+            });
+            // ACE обфускация әрі статистика-upload
+            asm.classes.forEach(cls => {
+                if (!/^ACE[A-Z]{7,}$/.test(cls.name)) return;
+                try {
+                    cls.methods.forEach(m => {
+                        if (!/send|post|upload|report/i.test(m.name)) return;
+                        const key = "ACE_TEL." + cls.name + "." + m.name;
+                        if (hookedShadow.has(key)) return;
+                        try {
+                            const orig = m;
+                            m.implementation = function () {
+                                if (!CFG.shadow.telemetryBlock) return orig.invoke.apply(this, arguments);
+                                if (m.returnType.name === "System.Void") return;
+                                if (m.returnType.name === "System.Boolean") return true;
+                                return orig.invoke.apply(this, arguments);
+                            };
+                            hookedShadow.add(key);
+                        } catch (_) {}
+                    });
+                } catch (_) {}
+            });
+        } catch (e) { LOG("telemetry hook", e); }
+    }
+
+    function hookReportImmunity() {
+        if (!CFG.shadow.reportImmune) return;
+        // ReportPlayer / SendReport / MsgReport — payload-та target-ты босатамыз
+        try {
+            asm.classes.forEach(cls => {
+                try {
+                    cls.methods.forEach(m => {
+                        if (!/^(Report|SendReport|SubmitReport|DoReport|OnReport)/i.test(m.name)) return;
+                        if (/Daily|Weekly|Stats|Shop|Store|Mission|Progress/i.test(m.name)) return;
+                        const key = "RI." + cls.name + "." + m.name;
+                        if (hookedShadow.has(key)) return;
+                        try {
+                            const orig = m;
+                            m.implementation = function (...args) {
+                                if (!CFG.shadow.reportImmune) return orig.invoke.apply(this, args);
+                                try {
+                                    if (!MY_UID) return orig.invoke.apply(this, args);
+                                    for (let i = 0; i < args.length; i++) {
+                                        const a = args[i];
+                                        if (typeof a !== "number") continue;
+                                        if (a === MY_UID) {
+                                            // Бізді репорт еткен — мәнсіз айналдырамыз
+                                            LOG("swallowed report hitting me:", cls.name + "." + m.name);
+                                            return (m.returnType.name === "System.Boolean") ? true : 0;
+                                        }
+                                    }
+                                } catch (_) {}
+                                return orig.invoke.apply(this, args);
+                            };
+                            hookedShadow.add(key);
+                        } catch (_) {}
+                    });
+                } catch (_) {}
+            });
+        } catch (e) { LOG("report-imm", e); }
+    }
+
+    function fingerprintRotate() {
+        if (!CFG.shadow.fingerprintRotate) return;
+        try {
+            // UIDevice.identifierForVendor → жаңа UUID
+            const UIDevice = ObjC.classes.UIDevice;
+            if (UIDevice) {
+                const NSUUID = ObjC.classes.NSUUID;
+                const fresh = NSUUID.UUID();
+                try {
+                    Interceptor.replace(UIDevice["- identifierForVendor"].implementation,
+                        new NativeCallback(() => fresh.handle, "pointer", ["pointer", "pointer"]));
+                    LOG("IDFV rotated:", fresh.UUIDString() + "");
+                } catch (_) {}
+            }
+            // Keychain-тағы deviceId-ды өшіру
+            const kc = ObjC.classes.SAMKeychain;
+            if (kc) {
+                try {
+                    const services = kc.allServices();
+                    for (let i = 0; i < services.count(); i++) {
+                        const s = services.objectAtIndex_(i) + "";
+                        if (/garena|freefire|device|aces|appsflyer/i.test(s))
+                            kc.deletePasswordForService_account_(s, "deviceId");
+                    }
+                } catch (_) {}
+            }
+            // AppsFlyer UID reset
+            try {
+                const AF = ObjC.classes.AppsFlyerLib || ObjC.classes.AppsFlyerTracker;
+                if (AF && AF.shared && AF.shared() && AF.shared().setCustomerUserID_) {
+                    AF.shared().setCustomerUserID_("");
+                }
+            } catch (_) {}
+            // NSUserDefaults — garena/aces кеш кілттерін тазарту
+            try {
+                const UD = ObjC.classes.NSUserDefaults.standardUserDefaults();
+                const dict = UD.dictionaryRepresentation();
+                const keys = dict.allKeys();
+                for (let i = 0; i < keys.count(); i++) {
+                    const k = keys.objectAtIndex_(i) + "";
+                    if (/garena|aces|freefire|hwid|deviceid|idfv|appsflyer/i.test(k))
+                        UD.removeObjectForKey_(k);
+                }
+                UD.synchronize();
+            } catch (_) {}
+        } catch (e) { LOG("fp-rotate", e); }
+    }
+
+    function queueDodge() {
+        showToast("…", color(0.3, 0.6, 1, 0.9));
+        try {
+            // matchmaker ping cookie-ларын тазарту
+            try {
+                const UD = ObjC.classes.NSUserDefaults.standardUserDefaults();
+                const dict = UD.dictionaryRepresentation();
+                const keys = dict.allKeys();
+                for (let i = 0; i < keys.count(); i++) {
+                    const k = keys.objectAtIndex_(i) + "";
+                    if (/matchmake|queue|mmr|pool|lobby/i.test(k))
+                        UD.removeObjectForKey_(k);
+                }
+                UD.synchronize();
+            } catch (_) {}
+            // Lobby/Queue сұраныстарды қайта жүктеу
+            let fired = 0;
+            asm.classes.forEach(cls => {
+                if (!/Matchmake|Lobby|Queue/i.test(cls.name)) return;
+                try {
+                    cls.methods.forEach(m => {
+                        if (/^(ClearCache|Reset|Rejoin|Reconnect|ForceRefresh|Clear)/i.test(m.name)) {
+                            try { m.invoke(); fired++; LOG("queue-dodge:", cls.name + "." + m.name); } catch (_) {}
+                        }
+                    });
+                } catch (_) {}
+            });
+            showToast(fired > 0 ? "✓" : "✓", color(0.3, 1, 0.5, 0.9));
+            POOL_SUSPECT_COUNT = 0;
+        } catch (e) { LOG("queue-dodge", e); showToast("✗", color(1, 0.4, 0.4, 0.9)); }
+    }
+
+    function poolDetectPass() {
+        if (!CFG.shadow.poolDetect) return;
+        const PC = asm.class("PlayerController"); if (!PC) return;
+        let suspect = 0;
+        try {
+            Il2Cpp.gc.choose(PC).forEach(p => {
+                try {
+                    const h = safe(() => p.field("headshotRatio").value, null);
+                    const acc = safe(() => p.field("accuracyPct").value, null);
+                    const kills = safe(() => p.field("totalKills").value, null);
+                    if (h !== null && h > 0.75) suspect++;
+                    else if (acc !== null && acc > 85) suspect++;
+                    else if (kills !== null && kills > 15000) suspect++;
+                } catch (_) {}
+            });
+        } catch (_) {}
+        if (suspect >= 3) {
+            POOL_SUSPECT_COUNT++;
+            if (POOL_SUSPECT_COUNT === 1) {
+                showToast("POOL!", color(1, 0.5, 0.3, 0.9));
+                LOG("[pool] cheater lobby suspected, suspects=", suspect);
+            }
+        } else {
+            POOL_SUSPECT_COUNT = 0;
+        }
+    }
+
+    function resolveMyUid() {
+        try {
+            const PC = asm.class("PlayerController"); if (!PC) return;
+            const local = Il2Cpp.gc.choose(PC).find(p => safe(() => p.field("isLocalPlayer").value));
+            if (local) {
+                MY_UID = safe(() => local.field("uid").value, null)
+                      || safe(() => local.field("userId").value, null)
+                      || safe(() => local.field("playerId").value, null);
+                if (MY_UID) LOG("MY_UID =", MY_UID);
+            }
+        } catch (_) {}
+    }
+
     // ====================== kick off ======================
     buildMenu();
     buildEspLayer();
@@ -946,19 +1224,25 @@ Il2Cpp.perform(() => {
     hookLegitCam();
     stubAntiHack();
     hookBanCapture();
+    hookTelemetry();
+    hookReportImmunity();
+    fingerprintRotate();
     nativeBypass();
     reskin();
+    setInterval(() => schedSafe(resolveMyUid), 5000);
 
     // periodic re-scan so new classes loaded after boot get caught
-    setInterval(() => {
+    setInterval(() => schedSafe(() => {
         try {
             if (CFG.noRecoil || CFG.noSpread || CFG.noBulletDrop || CFG.aim.on || CFG.misc.autoHeadshot) hookWeaponFire();
             if (CFG.misc.instantHit) hookInstantHit();
             if (CFG.antiban.autoStub) stubAntiHack();
             if (CFG.antiban.captureBan) hookBanCapture();
+            if (CFG.shadow.telemetryBlock) hookTelemetry();
+            if (CFG.shadow.reportImmune) hookReportImmunity();
             hookLegitCam();
         } catch (_) {}
-    }, 5000);
+    }), 5000);
 
     LOG("Galactica v2 ready — экран сол бұрышын бас");
 });
