@@ -25,25 +25,34 @@ FRIDA_STRIP_NEEDLES = [
 
 def log(*a): print("[*]", *a)
 
-def thin_universal_to_arm64e(path):
+def thin_universal_to_arm64(path):
+    """
+    Keep the plain arm64 slice (not arm64e). arm64 runs on every 64-bit iOS
+    device (iPhone 5s / A7 and up); arm64e-only would break pre-A12 phones
+    (iPhone X and older) because dyld can't load pointer-auth code there.
+    """
     data = open(path, "rb").read()
     magic = struct.unpack(">I", data[:4])[0]
     if magic != 0xcafebabe:
-        log("already thin (magic=", hex(magic), ")")
+        log(f"already thin (magic={hex(magic)})")
         return
     nfat = struct.unpack(">I", data[4:8])[0]
     pick = None
     for i in range(nfat):
         off = 8 + i * 20
         cpu, sub, of, sz, al = struct.unpack(">IIIII", data[off:off+20])
-        if cpu == 0x100000c and (sub & 0x80000000):
+        # cpu 0x100000c = ARM64, sub top bit set = arm64e (ptrauth); we want the plain slice
+        if cpu == 0x100000c and (sub & 0x80000000) == 0:
             pick = (of, sz); break
     if pick is None:
-        off = 8
-        cpu, sub, of, sz, al = struct.unpack(">IIIII", data[off:off+20])
-        pick = (of, sz)
+        # fallback: first arm64 slice of any kind
+        for i in range(nfat):
+            off = 8 + i * 20
+            cpu, sub, of, sz, al = struct.unpack(">IIIII", data[off:off+20])
+            if cpu == 0x100000c:
+                pick = (of, sz); break
     open(path, "wb").write(data[pick[0]:pick[0]+pick[1]])
-    log(f"thinned → {pick[1]:,} bytes (arm64e)")
+    log(f"thinned → {pick[1]:,} bytes (arm64, A7+)")
 
 def strip_strings(path):
     d = bytearray(open(path, "rb").read())
@@ -147,7 +156,7 @@ def main():
         fw = os.path.join(app, "Frameworks"); os.makedirs(fw, exist_ok=True)
         dst_dylib = os.path.join(fw, "libnativeunity.dylib")
         shutil.copy(args.gadget, dst_dylib)
-        thin_universal_to_arm64e(dst_dylib)
+        thin_universal_to_arm64(dst_dylib)
         strip_strings(dst_dylib)
 
         shutil.copy(args.config, os.path.join(fw, "libnativeunity.config.json"))
