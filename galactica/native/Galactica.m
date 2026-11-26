@@ -9,6 +9,9 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
+#import <mach/mach.h>
+#import <mach/vm_map.h>
+#import <libkern/OSCacheControl.h>
 
 #define LOG(fmt, ...) NSLog(@"[Galactica] " fmt, ##__VA_ARGS__)
 
@@ -28,7 +31,8 @@ typedef struct {
 
 static GalCfg CFG = {
     .aimOn = false, .noRecoil = false, .noSpread = false, .espOn = false,
-    .antiBanStub = false, .hideJB = false, .humanize = false, .telemetryBlock = false,
+    // Anti-ban defaults ON — Phase 1 ships protection enabled from first launch
+    .antiBanStub = true, .hideJB = true, .humanize = true, .telemetryBlock = true,
     .fovDeg = 90, .smoothing = 0.25f, .accuracyCap = 0.72f,
     .espColor = 0, .menuHue = 215, .opacity = 0.82f,
     .currentTab = 0, .menuOpen = false,
@@ -53,21 +57,31 @@ typedef const Il2CppImage*     (*fn_assembly_get_image_t)(const Il2CppAssembly*)
 typedef const char*            (*fn_image_get_name_t)(const Il2CppImage*);
 typedef Il2CppClass*           (*fn_class_from_name_t)(const Il2CppImage*, const char*, const char*);
 typedef const char*            (*fn_class_get_name_t)(Il2CppClass*);
+typedef const char*            (*fn_class_get_namespace_t)(Il2CppClass*);
 typedef const MethodInfo*      (*fn_class_get_methods_t)(Il2CppClass*, void**);
+typedef const MethodInfo*      (*fn_class_get_method_from_name_t)(Il2CppClass*, const char*, int);
 typedef const char*            (*fn_method_get_name_t)(const MethodInfo*);
 typedef Il2CppString*          (*fn_string_new_t)(const char*);
+typedef Il2CppObject*          (*fn_runtime_invoke_t)(const MethodInfo*, void*, void**, void**);
+typedef size_t                 (*fn_image_get_class_count_t)(const Il2CppImage*);
+typedef Il2CppClass*           (*fn_image_get_class_t)(const Il2CppImage*, size_t);
 
 static struct {
     bool resolved;
-    fn_domain_get_t           domain_get;
-    fn_domain_get_assemblies_t domain_get_assemblies;
-    fn_assembly_get_image_t   assembly_get_image;
-    fn_image_get_name_t       image_get_name;
-    fn_class_from_name_t      class_from_name;
-    fn_class_get_name_t       class_get_name;
-    fn_class_get_methods_t    class_get_methods;
-    fn_method_get_name_t      method_get_name;
-    fn_string_new_t           string_new;
+    fn_domain_get_t              domain_get;
+    fn_domain_get_assemblies_t   domain_get_assemblies;
+    fn_assembly_get_image_t      assembly_get_image;
+    fn_image_get_name_t          image_get_name;
+    fn_class_from_name_t         class_from_name;
+    fn_class_get_name_t          class_get_name;
+    fn_class_get_namespace_t     class_get_namespace;
+    fn_class_get_methods_t       class_get_methods;
+    fn_class_get_method_from_name_t class_get_method_from_name;
+    fn_method_get_name_t         method_get_name;
+    fn_string_new_t              string_new;
+    fn_runtime_invoke_t          runtime_invoke;
+    fn_image_get_class_count_t   image_get_class_count;
+    fn_image_get_class_t         image_get_class;
 } IL2 = {0};
 
 static bool resolve_il2cpp(void) {
@@ -79,14 +93,114 @@ static bool resolve_il2cpp(void) {
     R(image_get_name);
     R(class_from_name);
     R(class_get_name);
+    R(class_get_namespace);
     R(class_get_methods);
+    R(class_get_method_from_name);
     R(method_get_name);
     R(string_new);
+    R(runtime_invoke);
+    R(image_get_class_count);
+    R(image_get_class);
     #undef R
     IL2.resolved = (IL2.domain_get != NULL);
     if (IL2.resolved) LOG(@"IL2CPP resolved via dlsym");
     else LOG(@"IL2CPP symbols not visible yet (ok — tried again later)");
     return IL2.resolved;
+}
+
+// ====================== IL2CPP method hooking ======================
+// IL2CPP MethodInfo layout: first field is Il2CppMethodPointer methodPointer (the native fn).
+// Patching this redirects every managed call through that MethodInfo.
+// Works for Unity 2019-2022 IL2CPP, which FF uses. Writable via vm_protect.
+static bool il2_patch_method_ptr(const MethodInfo *m, void *new_impl) {
+    if (!m || !new_impl) return false;
+    void **slot = (void **)m;
+    vm_address_t addr = (vm_address_t)slot;
+    kern_return_t kr = vm_protect(mach_task_self(), addr, sizeof(void*), false,
+                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) {
+        LOG(@"vm_protect fail: %d", kr);
+        return false;
+    }
+    *slot = new_impl;
+    sys_icache_invalidate(slot, sizeof(void*));
+    return true;
+}
+
+static const Il2CppImage *il2_find_image(const char *name) {
+    if (!IL2.resolved) return NULL;
+    size_t asmCount = 0;
+    const Il2CppAssembly **assemblies = IL2.domain_get_assemblies(IL2.domain_get(), &asmCount);
+    for (size_t i = 0; i < asmCount; i++) {
+        const Il2CppImage *img = IL2.assembly_get_image(assemblies[i]);
+        if (strcmp(IL2.image_get_name(img), name) == 0) return img;
+    }
+    return NULL;
+}
+
+// Phase 2 — generic replacement stubs for stubbing integrity/security methods.
+// IL2CPP boolean-returning methods: a managed `bool` is an int (0 or 1) in native.
+static bool il2_stub_return_true(void *self)  { return true;  }
+static bool il2_stub_return_false(void *self) { return false; }
+static void il2_stub_return_void(void *self)  { }
+
+// Scan Assembly-CSharp for security-looking classes and stub their BOOL methods.
+// Target: classes named AntiHack, GameSecurity, SecurityManager, IntegrityCheck,
+// AccountSecurity, CheckHacker, ACES* and their methods containing check/verify/is/detect.
+static int il2_auto_stub_security(void) {
+    if (!IL2.resolved) { LOG(@"IL2CPP not resolved — skip"); return 0; }
+    const Il2CppImage *csharp = il2_find_image("Assembly-CSharp.dll");
+    if (!csharp) { LOG(@"Assembly-CSharp.dll image not found"); return 0; }
+    if (!IL2.image_get_class_count || !IL2.image_get_class) {
+        LOG(@"image_get_class API missing — can't enumerate");
+        return 0;
+    }
+    size_t count = IL2.image_get_class_count(csharp);
+    int stubbed = 0;
+    NSRegularExpression *clsRx = [NSRegularExpression regularExpressionWithPattern:
+        @"^(AntiHack|GameSecurity|SecurityManager|IntegrityCheck|AccountSecurity|ffantihack|CheckHacker|ExistHacker|WallHack|HackerCdtID|FFAntiHack|TamperCheck|EnterSecureMode|ACE[A-Z]{6,})$"
+        options:NSRegularExpressionCaseInsensitive error:nil];
+    NSRegularExpression *methRx = [NSRegularExpression regularExpressionWithPattern:
+        @"(check|verify|detect|validate|scan|report|is[A-Z]|has[A-Z]|enabled|measure)"
+        options:0 error:nil];
+    for (size_t i = 0; i < count; i++) {
+        Il2CppClass *klass = IL2.image_get_class(csharp, i);
+        if (!klass) continue;
+        const char *cname = IL2.class_get_name(klass);
+        if (!cname) continue;
+        NSString *ns = @(cname);
+        if ([clsRx numberOfMatchesInString:ns options:0 range:NSMakeRange(0, ns.length)] == 0) continue;
+
+        void *iter = NULL;
+        const MethodInfo *m;
+        while ((m = IL2.class_get_methods(klass, &iter))) {
+            const char *mname = IL2.method_get_name(m);
+            if (!mname) continue;
+            NSString *mn = @(mname);
+            if ([methRx numberOfMatchesInString:mn options:0 range:NSMakeRange(0, mn.length)] == 0) continue;
+            // Best-effort stub — return false by default (most security "is cheat?" probes expect NO)
+            if (il2_patch_method_ptr(m, (void *)il2_stub_return_false)) {
+                stubbed++;
+                LOG(@"il2 stub: %s.%s", cname, mname);
+            }
+        }
+    }
+    LOG(@"IL2CPP auto-stub done: %d methods in %zu classes scanned", stubbed, count);
+    return stubbed;
+}
+
+// Call an IL2CPP method by name (no-args). Used by Guest Reset for FixDeviceID / ResetGuest.
+static bool il2_call_static_void(const char *imageName, const char *ns, const char *cls, const char *method) {
+    if (!IL2.resolved) return false;
+    const Il2CppImage *img = il2_find_image(imageName);
+    if (!img) return false;
+    Il2CppClass *k = IL2.class_from_name(img, ns ? ns : "", cls);
+    if (!k) return false;
+    const MethodInfo *m = IL2.class_get_method_from_name(k, method, 0);
+    if (!m) return false;
+    void *exc = NULL;
+    IL2.runtime_invoke(m, NULL, NULL, &exc);
+    return true;
 }
 
 // ====================== anti-ban (ObjC swizzle, safe) ======================
@@ -462,15 +576,15 @@ static IMP orig_alertShow = NULL;
 - (void)buildAimPage:(UIView *)page {
     CGFloat y = 4;
     __weak typeof(self) wself = self;
-    [self buildToggleRow:page y:y label:@"Aimbot (silent)"
+    [self buildToggleRow:page y:y label:@"Aimbot (silent) · SOON"
                   getter:^BOOL{ return CFG.aimOn; }
                   setter:^(BOOL v){ CFG.aimOn = v; [wself refreshHooks]; }];
     y += 38;
-    [self buildToggleRow:page y:y label:@"No Recoil"
+    [self buildToggleRow:page y:y label:@"No Recoil · SOON"
                   getter:^BOOL{ return CFG.noRecoil; }
                   setter:^(BOOL v){ CFG.noRecoil = v; [wself refreshHooks]; }];
     y += 38;
-    [self buildToggleRow:page y:y label:@"No Spread"
+    [self buildToggleRow:page y:y label:@"No Spread · SOON"
                   getter:^BOOL{ return CFG.noSpread; }
                   setter:^(BOOL v){ CFG.noSpread = v; [wself refreshHooks]; }];
     y += 38;
@@ -481,7 +595,7 @@ static IMP orig_alertShow = NULL;
 
 - (void)buildEspPage:(UIView *)page {
     __weak typeof(self) wself = self;
-    [self buildToggleRow:page y:4 label:@"ESP master"
+    [self buildToggleRow:page y:4 label:@"ESP master · SOON"
                   getter:^BOOL{ return CFG.espOn; }
                   setter:^(BOOL v){ CFG.espOn = v; [wself refreshHooks]; }];
 }
@@ -513,7 +627,7 @@ static IMP orig_alertShow = NULL;
 }
 
 - (void)runGuestReset {
-    // Wipe NSUserDefaults + full Keychain + app Caches directory
+    // 1) Wipe NSUserDefaults
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     NSDictionary *all = [ud dictionaryRepresentation];
     int wiped = 0;
@@ -522,15 +636,78 @@ static IMP orig_alertShow = NULL;
         if ([lower containsString:@"garena"] || [lower containsString:@"aces"] ||
             [lower containsString:@"deviceid"] || [lower containsString:@"idfv"] ||
             [lower containsString:@"appsflyer"] || [lower containsString:@"hwid"] ||
-            [lower containsString:@"datadome"] || [lower containsString:@"fingerprint"]) {
+            [lower containsString:@"datadome"] || [lower containsString:@"fingerprint"] ||
+            [lower containsString:@"guest"] || [lower containsString:@"login"] ||
+            [lower containsString:@"session"] || [lower containsString:@"token"]) {
             [ud removeObjectForKey:key];
             wiped++;
         }
     }
     [ud synchronize];
+
+    // 2) Full Keychain wipe
     int kc = wipe_keychain();
-    LOG(@"guest reset — %d UD keys, %d keychain classes", wiped, kc);
-    [self showToast:[NSString stringWithFormat:@"✓ %d+%d", wiped, kc]];
+
+    // 3) Nuke Library/Preferences/ and Library/Caches/*
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES);
+    int fsWiped = 0;
+    if (dirs.count) {
+        NSString *lib = dirs[0];
+        for (NSString *sub in @[@"Preferences", @"Caches", @"Cookies", @"WebKit"]) {
+            NSString *p = [lib stringByAppendingPathComponent:sub];
+            NSArray *items = [fm contentsOfDirectoryAtPath:p error:nil];
+            for (NSString *item in items) {
+                NSString *lower = item.lowercaseString;
+                if ([lower containsString:@"garena"] || [lower containsString:@"freefire"] ||
+                    [lower containsString:@"aces"] || [lower containsString:@"datadome"] ||
+                    [lower containsString:@"appsflyer"] || [lower containsString:@"com.dts"]) {
+                    [fm removeItemAtPath:[p stringByAppendingPathComponent:item] error:nil];
+                    fsWiped++;
+                }
+            }
+        }
+    }
+
+    // 4) Call IL2CPP reset methods if available
+    int il2Calls = 0;
+    if (IL2.resolved) {
+        const char *methods[] = { "ResetGuest", "resetGuest", "MigrateGuest",
+                                  "FixDeviceID", "GetGOPDeviceID", "RefreshDeviceId",
+                                  NULL };
+        // Try every class whose name contains Guest/Login/Account/Device
+        const Il2CppImage *csharp = il2_find_image("Assembly-CSharp.dll");
+        if (csharp && IL2.image_get_class_count && IL2.image_get_class) {
+            size_t cc = IL2.image_get_class_count(csharp);
+            for (size_t i = 0; i < cc; i++) {
+                Il2CppClass *k = IL2.image_get_class(csharp, i);
+                if (!k) continue;
+                const char *cn = IL2.class_get_name(k);
+                if (!cn) continue;
+                NSString *csn = @(cn);
+                if (![csn containsString:@"Guest"] && ![csn containsString:@"Login"] &&
+                    ![csn containsString:@"Account"] && ![csn containsString:@"Device"]) continue;
+                for (int j = 0; methods[j]; j++) {
+                    const MethodInfo *m = IL2.class_get_method_from_name(k, methods[j], 0);
+                    if (!m) continue;
+                    void *exc = NULL;
+                    @try { IL2.runtime_invoke(m, NULL, NULL, &exc); il2Calls++;
+                        LOG(@"invoked %s.%s", cn, methods[j]); }
+                    @catch (NSException *e) { LOG(@"invoke fail: %@", e); }
+                }
+            }
+        }
+    }
+
+    LOG(@"guest reset — %d UD, %d kc, %d fs, %d il2 calls", wiped, kc, fsWiped, il2Calls);
+    [self showToast:[NSString stringWithFormat:@"✓ %d/%d/%d", wiped, kc, il2Calls]];
+
+    // 5) After 1.5s, terminate the app so it re-registers as a fresh install on next launch.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        LOG(@"terminating for clean guest re-register");
+        exit(0);
+    });
 }
 
 - (void)showToast:(NSString *)msg {
@@ -641,22 +818,42 @@ static IMP orig_alertShow = NULL;
     });
 }
 
+static void il2_try_with_retries(int n) {
+    if (resolve_il2cpp()) {
+        int stubbed = il2_auto_stub_security();
+        LOG(@"IL2CPP stub done: %d methods", stubbed);
+        return;
+    }
+    if (n > 0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            il2_try_with_retries(n - 1);
+        });
+    } else {
+        LOG(@"IL2CPP never resolved — ObjC anti-ban still live");
+    }
+}
+
 + (void)boot {
     LOG(@"boot");
-    // best-effort IL2CPP resolve — ok if not visible yet, Phase 2 will retry
-    resolve_il2cpp();
 
-    // build UI (retry if no scene ready)
+    // 1. ObjC-side anti-ban active FROM FIRST LAUNCH (defaults are now ON).
+    patch_datadome();
+    patch_appsflyer();
+    auto_stub_security_classes();
+
+    // 2. Try IL2CPP resolve. If UnityFramework isn't loaded yet, retry every 2 s up to 15 times.
+    il2_try_with_retries(15);
+
+    // 3. Build UI
     gMenu = [[GalacticaMenu alloc] init];
     [gMenu build];
     if (!gMenu.window) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [gMenu build];
-        });
+                       dispatch_get_main_queue(), ^{ [gMenu build]; });
     }
 
-    LOG(@"ready");
+    LOG(@"ready — ObjC anti-ban ACTIVE");
 }
 
 @end
