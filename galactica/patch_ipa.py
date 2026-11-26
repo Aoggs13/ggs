@@ -17,11 +17,11 @@ LC_SEGMENT_64      = 0x19
 # flip this to use the regular load; weak is safer during bring-up
 INJECT_CMD = LC_LOAD_WEAK_DYLIB
 
-FRIDA_STRIP_NEEDLES = [
-    b"frida-agent", b"frida-gadget", b"frida-server",
-    b"gum-js-loop", b"gmain", b"FridaScript",
-    b"FridaAgentContext", b"GumScript",
-]
+# NOTE: do NOT zero out frida/gum strings. The gadget uses several of them
+# as module-registry keys at init time; nulling them trips its own
+# integrity path and dyld calls abort() during LibSystemHelpers::callInitializer.
+# Known good: ship the gadget as released by frida.re.
+FRIDA_STRIP_NEEDLES = []
 
 def log(*a): print("[*]", *a)
 

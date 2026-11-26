@@ -19,12 +19,12 @@ on:
       gadget_url:
         description: "Frida gadget universal dylib (gz) URL"
         required: false
-        default: "https://github.com/frida/frida/releases/download/16.5.9/frida-gadget-16.5.9-ios-universal.dylib.gz"
+        default: "https://github.com/frida/frida/releases/download/17.27.2/frida-gadget-17.27.2-ios-universal.dylib.gz"
 
 env:
   RELEASE_TAG: ${{ github.event.inputs.release_tag || 'galactica' }}
   ORIG_IPA_URL: ${{ github.event.inputs.orig_ipa_url || 'https://github.com/Aoggs13/ggs/releases/download/fforig/com.dts.freefireth_1.132.1_und3fined.ipa' }}
-  GADGET_URL: ${{ github.event.inputs.gadget_url || 'https://github.com/frida/frida/releases/download/16.5.9/frida-gadget-16.5.9-ios-universal.dylib.gz' }}
+  GADGET_URL: ${{ github.event.inputs.gadget_url || 'https://github.com/frida/frida/releases/download/17.27.2/frida-gadget-17.27.2-ios-universal.dylib.gz' }}
 
 permissions:
   contents: write
