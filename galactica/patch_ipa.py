@@ -11,8 +11,11 @@ import os, sys, shutil, struct, tempfile, zipfile, argparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DYLIB_INJECT_PATH = b"@executable_path/Frameworks/libnativeunity.dylib"
-LC_LOAD_DYLIB = 0x0c
-LC_SEGMENT_64 = 0x19
+LC_LOAD_DYLIB      = 0x0c
+LC_LOAD_WEAK_DYLIB = (0x18 | 0x80000000)   # weak: app runs even if dylib fails to load
+LC_SEGMENT_64      = 0x19
+# flip this to use the regular load; weak is safer during bring-up
+INJECT_CMD = LC_LOAD_WEAK_DYLIB
 
 FRIDA_STRIP_NEEDLES = [
     b"frida-agent", b"frida-gadget", b"frida-server",
@@ -76,7 +79,7 @@ def insert_lc_load_dylib(binpath):
                     if off > 0 and (text_start is None or off < text_start):
                         text_start = off
                     sc += 80
-        elif cmd == LC_LOAD_DYLIB:
+        elif cmd == LC_LOAD_DYLIB or cmd == LC_LOAD_WEAK_DYLIB:
             if bytes(d[cursor+24:cursor+size]).split(b"\x00", 1)[0] == DYLIB_INJECT_PATH:
                 already = True
         cursor += size
@@ -89,7 +92,7 @@ def insert_lc_load_dylib(binpath):
     total = 24 + len(path_bytes)
     pad = (8 - (total % 8)) % 8
     total += pad
-    new_cmd = (struct.pack("<IIIIII", LC_LOAD_DYLIB, total, 24, 2, 0x00010000, 0x00010000)
+    new_cmd = (struct.pack("<IIIIII", INJECT_CMD, total, 24, 2, 0x00010000, 0x00010000)
                + path_bytes + b"\x00" * pad)
     free = text_start - cmd_blob_end
     if free < total:

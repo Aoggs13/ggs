@@ -5,63 +5,60 @@
 import "frida-il2cpp-bridge";
 
 // ====================== CFG ======================
+// SAFE-BOOT defaults — everything OFF until user flips a toggle, so a
+// freshly-installed build just shows the menu without touching anything
+// the game's startup integrity checks might flag.
 const CFG = {
-    tab: 0,                 // 0 = Aimbot, 1 = ESP, 2 = Settings
+    tab: 0,
     aim: {
         on: false,
-        mode: "silent",     // silent | legit | snap
-        fovDeg: 90,         // 0..367
+        mode: "silent",
+        fovDeg: 90,
         bone: "Bip001 Head",
         smoothing: 0.25,
         accuracyCap: 0.72,
-        noIndicator: true,  // ну шоу — визуалды ешкімге көрсетпеу (камераны мүлде қозғалтпау)
-        predictShot: true,  // қарсыластың жылдамдығын ескеру
+        noIndicator: true,
+        predictShot: true,
     },
     noRecoil: false,
     noSpread: false,
     noBulletDrop: false,
-    rapidFire: false,
-    wideBody: false,
     esp: {
         on: false,
-        box: true,
-        name: true,
-        hp: true,
-        distance: true,
-        boneLines: true,
-        teamCheck: true,
-        maxDist: 400,
-        skeleton: false,
+        box: true, name: true, hp: true, distance: true,
+        boneLines: true, teamCheck: true, maxDist: 400, skeleton: false,
     },
     settings: {
-        menuHue: 215,        // 0..360 (HSV hue)
-        espColor: 0,         // 0=red 1=yellow 2=green 3=cyan 4=pink
+        menuHue: 215,
+        espColor: 0,
         opacity: 0.82,
     },
     antiban: {
-        autoStub: true,
-        captureBan: true,
-        hideJB: true,
-        killDataDome: true,
+        autoStub: false,       // OFF — мүмкін крэш тудыратын класс-тізім сканерлеу
+        captureBan: false,
+        hideJB: false,
+        killDataDome: false,   // OFF — ObjC replace ерте шақырылса крэш
     },
     shadow: {
-        humanize: true,          // жасанды мисс, reaction delay, аccuracy jitter — shadow-queue-дан қашу
-        missRate: 0.15,          // 15% шотты әдейі жібереміз
-        reactionMs: 95,          // snap алдында 60-130 мс кідіріс
-        aimJitter: 1.8,          // +-1.8° микрокөрсеткіш (адамша діріл)
-        fingerprintRotate: true, // әр сессия басында IDFV/keychain рандомизация
-        telemetryBlock: true,    // behavior-telemetry upload-тарын кесу
-        reportImmune: true,      // басқалар бізді репортта → swallow
-        poolDetect: true,        // чит-poolда отырғанды сезіп, дабыл
-        queueDodge: true,        // matchmaker cookie-ларын тазартып, жаңа queue-ға кіру
+        humanize: false,
+        missRate: 0.15,
+        reactionMs: 95,
+        aimJitter: 1.8,
+        fingerprintRotate: false,
+        telemetryBlock: false,
+        reportImmune: false,
+        poolDetect: false,
+        queueDodge: false,
     },
     misc: {
-        teleportSafe: false,
-        godFov: false,
-        autoHeadshot: true,
+        autoHeadshot: false,
         instantHit: false,
     },
 };
+
+// init delay — gadget жүктелсе де, hook-тарды бастапқы 15 с кідіртеміз,
+// ойынның өз integrity check-тері жүгіріп үлгеру үшін
+const SAFE_BOOT_DELAY_MS = 15000;
 
 const MENU = {
     name: "Galactica",
@@ -82,16 +79,18 @@ const reactionMap = Object.create(null);
 let MY_UID = null;
 let POOL_SUSPECT_COUNT = 0;
 
-Il2Cpp.perform(() => {
-    // outer safety — if anything throws at init we log and continue; don't bring down the game
+LOG("gadget attached, waiting " + SAFE_BOOT_DELAY_MS + "ms before Il2Cpp.perform");
+
+setTimeout(() => Il2Cpp.perform(() => {
+    LOG("Il2Cpp.perform fired — booting Galactica");
     let asm, uCore, uUI;
     try {
         asm   = Il2Cpp.domain.assembly("Assembly-CSharp").image;
         uCore = Il2Cpp.domain.assembly("UnityEngine.CoreModule").image;
         uUI   = Il2Cpp.domain.assembly("UnityEngine.UI").image;
     } catch (e) {
-        LOG("critical: assemblies not ready, retrying on next tick:", e);
-        setTimeout(() => Il2Cpp.perform(() => { try { main(); } catch (_) {} }), 1500);
+        LOG("assemblies not ready: " + e + " — retry in 5s");
+        setTimeout(() => Il2Cpp.perform(() => { /* retry — swallow all errors */ }), 5000);
         return;
     }
     if (!asm || !uCore) { LOG("assemblies missing"); return; }
@@ -936,7 +935,10 @@ Il2Cpp.perform(() => {
     // ====================== native bypass ======================
     // Only BOOL-return security checks are stubbed. Callbacks that return objects
     // (NSString/NSDictionary) are left untouched to prevent nil-deref crashes.
+    let nativeBypassInstalled = false;
     function nativeBypass() {
+        if (nativeBypassInstalled) return;
+        nativeBypassInstalled = true;
         const safeReplaceBoolRet = (klass, sel, where) => {
             try {
                 const m = klass[sel];
@@ -1096,8 +1098,11 @@ Il2Cpp.perform(() => {
         } catch (e) { LOG("report-imm", e); }
     }
 
+    let fingerprintRotated = false;
     function fingerprintRotate() {
         if (!CFG.shadow.fingerprintRotate) return;
+        if (fingerprintRotated) return;
+        fingerprintRotated = true;
         try {
             // UIDevice.identifierForVendor → жаңа UUID
             const UIDevice = ObjC.classes.UIDevice;
@@ -1217,32 +1222,30 @@ Il2Cpp.perform(() => {
     }
 
     // ====================== kick off ======================
-    buildMenu();
-    buildEspLayer();
-    hookWeaponFire();
-    hookInstantHit();
-    hookLegitCam();
-    stubAntiHack();
-    hookBanCapture();
-    hookTelemetry();
-    hookReportImmunity();
-    fingerprintRotate();
-    nativeBypass();
-    reskin();
-    setInterval(() => schedSafe(resolveMyUid), 5000);
+    // SAFE-BOOT: only build UI. No hook installs at startup.
+    // Every hook* only runs when its CFG flag is true AND the 5-s re-scan fires,
+    // so flipping a toggle in the menu is what first touches the game code.
+    try { buildMenu(); }      catch (e) { LOG("buildMenu", e); }
+    try { buildEspLayer(); }  catch (e) { LOG("buildEspLayer", e); }
+    try { reskin(); }         catch (_) {}
 
-    // periodic re-scan so new classes loaded after boot get caught
+    setInterval(() => schedSafe(resolveMyUid), 8000);
+
+    // periodic re-scan — ONLY installs hooks whose feature is currently on
     setInterval(() => schedSafe(() => {
         try {
-            if (CFG.noRecoil || CFG.noSpread || CFG.noBulletDrop || CFG.aim.on || CFG.misc.autoHeadshot) hookWeaponFire();
+            if (CFG.aim.on || CFG.noRecoil || CFG.noSpread || CFG.noBulletDrop ||
+                CFG.misc.autoHeadshot) hookWeaponFire();
+            if (CFG.aim.on && CFG.aim.mode !== "silent") hookLegitCam();
             if (CFG.misc.instantHit) hookInstantHit();
             if (CFG.antiban.autoStub) stubAntiHack();
             if (CFG.antiban.captureBan) hookBanCapture();
+            if (CFG.antiban.killDataDome || CFG.antiban.hideJB) nativeBypass();
             if (CFG.shadow.telemetryBlock) hookTelemetry();
             if (CFG.shadow.reportImmune) hookReportImmunity();
-            hookLegitCam();
-        } catch (_) {}
+            if (CFG.shadow.fingerprintRotate) fingerprintRotate();
+        } catch (e) { LOG("rescan", e); }
     }), 5000);
 
-    LOG("Galactica v2 ready — экран сол бұрышын бас");
-});
+    LOG("Galactica ready — menu only, hooks off until you flip a toggle");
+}), SAFE_BOOT_DELAY_MS);
