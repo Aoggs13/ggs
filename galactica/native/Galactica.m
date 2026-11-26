@@ -21,6 +21,7 @@
 // ====================== CFG (runtime-mutable) ======================
 typedef struct {
     bool aimOn, noRecoil, noSpread, noBulletDrop, instantHit, espOn;
+    bool speedHack, jumpHack, flyMode, maxHealth, wideHitbox, oneShot;
     bool antiBanStub, hideJB, humanize, telemetryBlock;
     float fovDeg;        // 0..367
     float smoothing;     // 0..0.95
@@ -35,6 +36,8 @@ typedef struct {
 static GalCfg CFG = {
     .aimOn = false, .noRecoil = false, .noSpread = false,
     .noBulletDrop = false, .instantHit = false, .espOn = false,
+    .speedHack = false, .jumpHack = false, .flyMode = false,
+    .maxHealth = false, .wideHitbox = false, .oneShot = false,
     // Anti-ban defaults ON — Phase 1 ships protection enabled from first launch
     .antiBanStub = true, .hideJB = true, .humanize = true, .telemetryBlock = true,
     .fovDeg = 90, .smoothing = 0.25f, .accuracyCap = 0.72f,
@@ -309,6 +312,49 @@ static int il2_patch_instant_hit(void) {
         rx(@"(BulletSpeed|InitSpeed|GetBulletSpeed|get_speed|ProjectileSpeed)"),
         true,  // use big float for speed
         "instantHit");
+}
+
+static int il2_patch_speed_hack(void) {
+    return il2_patch_matching("Assembly-CSharp.dll",
+        rx(@"(Player.*|.*Movement.*|.*Character.*|.*Motor.*)"),
+        rx(@"(MoveSpeed|WalkSpeed|RunSpeed|SprintSpeed|get_speed|GetMoveSpeed|m_speed)"),
+        true, "speedHack");
+}
+
+static int il2_patch_jump_hack(void) {
+    return il2_patch_matching("Assembly-CSharp.dll",
+        rx(@"(Player.*|.*Movement.*|.*Character.*|.*Motor.*|.*Jump.*)"),
+        rx(@"(JumpHeight|JumpVelocity|JumpForce|get_jumpSpeed|GetJumpHeight)"),
+        true, "jumpHack");
+}
+
+static int il2_patch_fly_mode(void) {
+    // Gravity = 0 → fly. Only touch Player*/Movement* classes to avoid messing with bullet drop.
+    return il2_patch_matching("Assembly-CSharp.dll",
+        rx(@"(Player.*|.*Movement.*|.*Character.*|.*Motor.*)"),
+        rx(@"(GetGravity|get_gravity|CalcGravity|ApplyGravity)"),
+        false, "flyMode");
+}
+
+static int il2_patch_max_health(void) {
+    return il2_patch_matching("Assembly-CSharp.dll",
+        rx(@"(Player.*|.*Health.*|.*HP.*|.*Life.*)"),
+        rx(@"(MaxHealth|MaxHP|GetMaxHP|get_maxHp|get_maxHealth|GetMaxLife)"),
+        true, "maxHealth");
+}
+
+static int il2_patch_wide_hitbox(void) {
+    return il2_patch_matching("Assembly-CSharp.dll",
+        rx(@"(HitBox|Hitbox|HurtBox|Collider.*|BodyPart.*)"),
+        rx(@"(GetRadius|get_radius|HitRadius|BodyRadius|get_bounds)"),
+        true, "wideHitbox");
+}
+
+static int il2_patch_one_shot(void) {
+    return il2_patch_matching("Assembly-CSharp.dll",
+        rx(@"(Weapon.*|Damage.*|.*Bullet.*|.*Hit.*)"),
+        rx(@"(GetDamage|CalcDamage|BaseDamage|get_damage|GetDmg|ComputeDamage)"),
+        true, "oneShot");
 }
 
 // Call an IL2CPP method by name (no-args). Used by Guest Reset for FixDeviceID / ResetGuest.
@@ -747,32 +793,8 @@ static IMP orig_alertShow = NULL;
 
 - (void)buildAimPage:(UIScrollView *)page {
     CGFloat y = 4;
-    __weak typeof(self) wself = self;
 
-    [self buildToggleRow:page y:y label:@"Aimbot (silent) · SOON" soon:YES
-                  getter:^BOOL{ return CFG.aimOn; }
-                  setter:^(BOOL v){ CFG.aimOn = v; [wself refreshHooks]; }];
-    y += 38;
-    [self buildButtonRow:page y:y label:@"Mode" btnLabel:@"silent" soon:YES action:^{}];
-    y += 38;
-    [self buildSliderRow:page y:y label:@"FOV (0-367°)"
-                     min:0 max:367 value:CFG.fovDeg
-                  setter:^(float v){ CFG.fovDeg = v; } soon:YES];
-    y += 38;
-    [self buildSliderRow:page y:y label:@"Smoothing"
-                     min:0 max:0.95 value:CFG.smoothing
-                  setter:^(float v){ CFG.smoothing = v; } soon:YES];
-    y += 38;
-    [self buildSliderRow:page y:y label:@"Accuracy cap %"
-                     min:0.10 max:1.0 value:CFG.accuracyCap
-                  setter:^(float v){ CFG.accuracyCap = v; } soon:YES];
-    y += 38;
-    [self buildToggleRow:page y:y label:@"No indicator" soon:YES
-                  getter:^BOOL{ return YES; } setter:^(BOOL v){}];
-    y += 38;
-    [self buildToggleRow:page y:y label:@"Predict shot" soon:YES
-                  getter:^BOOL{ return YES; } setter:^(BOOL v){}];
-    y += 38;
+    // === WORKING now (IL2CPP method stub) ===
     [self buildToggleRow:page y:y label:@"No Recoil" soon:NO
                   getter:^BOOL{ return CFG.noRecoil; }
                   setter:^(BOOL v){ CFG.noRecoil = v; if (v) il2_patch_no_recoil(); }];
@@ -785,9 +807,46 @@ static IMP orig_alertShow = NULL;
                   getter:^BOOL{ return CFG.noBulletDrop; }
                   setter:^(BOOL v){ CFG.noBulletDrop = v; if (v) il2_patch_no_bullet_drop(); }];
     y += 38;
+    [self buildToggleRow:page y:y label:@"Instant Hit" soon:NO
+                  getter:^BOOL{ return CFG.instantHit; }
+                  setter:^(BOOL v){ CFG.instantHit = v; if (v) il2_patch_instant_hit(); }];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"One-Shot Damage" soon:NO
+                  getter:^BOOL{ return CFG.oneShot; }
+                  setter:^(BOOL v){ CFG.oneShot = v; if (v) il2_patch_one_shot(); }];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Wide Hitbox" soon:NO
+                  getter:^BOOL{ return CFG.wideHitbox; }
+                  setter:^(BOOL v){ CFG.wideHitbox = v; if (v) il2_patch_wide_hitbox(); }];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Speed Hack" soon:NO
+                  getter:^BOOL{ return CFG.speedHack; }
+                  setter:^(BOOL v){ CFG.speedHack = v; if (v) il2_patch_speed_hack(); }];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Jump Hack" soon:NO
+                  getter:^BOOL{ return CFG.jumpHack; }
+                  setter:^(BOOL v){ CFG.jumpHack = v; if (v) il2_patch_jump_hack(); }];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Fly Mode (zero gravity)" soon:NO
+                  getter:^BOOL{ return CFG.flyMode; }
+                  setter:^(BOOL v){ CFG.flyMode = v; if (v) il2_patch_fly_mode(); }];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Max Health boost" soon:NO
+                  getter:^BOOL{ return CFG.maxHealth; }
+                  setter:^(BOOL v){ CFG.maxHealth = v; if (v) il2_patch_max_health(); }];
+    y += 38;
     [self buildToggleRow:page y:y label:@"Humanize (anti-shadowban)" soon:NO
                   getter:^BOOL{ return CFG.humanize; }
                   setter:^(BOOL v){ CFG.humanize = v; }];
+    y += 42;
+
+    // === TRUE aimbot is Phase 3 (needs vector math + enemy enumeration) ===
+    [self buildToggleRow:page y:y label:@"Aimbot (silent) · Phase 3" soon:YES
+                  getter:^BOOL{ return CFG.aimOn; } setter:^(BOOL v){}];
+    y += 38;
+    [self buildSliderRow:page y:y label:@"FOV · Phase 3"
+                     min:0 max:367 value:CFG.fovDeg
+                  setter:^(float v){ CFG.fovDeg = v; } soon:YES];
     y += 38;
 
     page.contentSize = CGSizeMake(page.bounds.size.width, y + 10);
