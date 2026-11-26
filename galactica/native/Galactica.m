@@ -585,11 +585,6 @@ static IMP orig_alertShow = NULL;
 
 @end
 
-@interface GalBlockHolder : NSObject
-- (instancetype)initWithBlock:(void (^)(id))block;
-- (void)invoke:(id)sender;
-@end
-
 @implementation GalBlockHolder {
     void (^_block)(id);
     __strong id _self;  // retain ourselves so the target stays alive while the control holds a weak ref
