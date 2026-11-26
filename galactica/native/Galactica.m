@@ -12,6 +12,9 @@
 #import <mach/mach.h>
 #import <mach/vm_map.h>
 #import <libkern/OSCacheControl.h>
+#if __has_feature(ptrauth_calls)
+#include <ptrauth.h>
+#endif
 
 #define LOG(fmt, ...) NSLog(@"[Galactica] " fmt, ##__VA_ARGS__)
 
@@ -118,8 +121,17 @@ static bool resolve_il2cpp(void) {
 
 // ====================== IL2CPP method hooking ======================
 // IL2CPP MethodInfo layout: first field is Il2CppMethodPointer methodPointer (the native fn).
-// Patching this redirects every managed call through that MethodInfo.
-// Works for Unity 2019-2022 IL2CPP, which FF uses. Writable via vm_protect.
+// On arm64e the slot is PAC-signed — we must sign our replacement before writing or the
+// authenticated branch from the IL2CPP dispatcher will fail and the game crashes.
+// Unity IL2CPP commonly signs with key=IA, discriminator=0 for direct-call method tables.
+static inline void *gal_sign_fn(void *fn) {
+#if __has_feature(ptrauth_calls)
+    return ptrauth_sign_unauthenticated(fn, ptrauth_key_function_pointer, 0);
+#else
+    return fn;
+#endif
+}
+
 static bool il2_patch_method_ptr(const MethodInfo *m, void *new_impl) {
     if (!m || !new_impl) return false;
     void **slot = (void **)m;
@@ -130,7 +142,7 @@ static bool il2_patch_method_ptr(const MethodInfo *m, void *new_impl) {
         LOG(@"vm_protect fail: %d", kr);
         return false;
     }
-    *slot = new_impl;
+    *slot = gal_sign_fn(new_impl);
     sys_icache_invalidate(slot, sizeof(void*));
     return true;
 }
@@ -1049,8 +1061,9 @@ static IMP orig_alertShow = NULL;
 
 static void il2_try_with_retries(int n) {
     if (resolve_il2cpp()) {
-        int stubbed = il2_auto_stub_security();
-        LOG(@"IL2CPP stub done: %d methods", stubbed);
+        // arm64e PAC makes blind MethodInfo swaps risky — don't blanket-stub at boot.
+        // Wait for the user to flip the "IL2CPP Auto-Stub" toggle. ObjC anti-ban runs anyway.
+        LOG(@"IL2CPP resolved — auto-stub idle until user opts in");
         return;
     }
     if (n > 0) {
