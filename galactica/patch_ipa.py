@@ -127,12 +127,14 @@ def main():
     ap.add_argument("orig")
     ap.add_argument("out")
     ap.add_argument("--gadget", default=os.path.join(HERE, "libnativeunity.dylib"))
-    ap.add_argument("--config", default=os.path.join(HERE, "libnativeunity.config.json"))
-    ap.add_argument("--script", default=os.path.join(HERE, "ff.js"))
+    ap.add_argument("--config", default=None,
+                    help="optional frida-gadget config json; skipped for native builds")
+    ap.add_argument("--script", default=None,
+                    help="optional frida JS script; skipped for native builds")
     ap.add_argument("--compress", type=int, default=6)
     args = ap.parse_args()
 
-    for p in (args.orig, args.gadget, args.config, args.script):
+    for p in (args.orig, args.gadget):
         if not os.path.exists(p): sys.exit(f"missing: {p}")
 
     tmp = tempfile.mkdtemp(prefix="galactica_")
@@ -156,11 +158,15 @@ def main():
         fw = os.path.join(app, "Frameworks"); os.makedirs(fw, exist_ok=True)
         dst_dylib = os.path.join(fw, "libnativeunity.dylib")
         shutil.copy(args.gadget, dst_dylib)
-        thin_universal_to_arm64(dst_dylib)
-        strip_strings(dst_dylib)
+        thin_universal_to_arm64(dst_dylib)   # no-op if already thin
+        strip_strings(dst_dylib)             # no-op with empty needle list
 
-        shutil.copy(args.config, os.path.join(fw, "libnativeunity.config.json"))
-        shutil.copy(args.script, os.path.join(app, "ff.js"))
+        if args.config and os.path.exists(args.config):
+            shutil.copy(args.config, os.path.join(fw, "libnativeunity.config.json"))
+            log("copied gadget config")
+        if args.script and os.path.exists(args.script):
+            shutil.copy(args.script, os.path.join(app, "ff.js"))
+            log("copied Frida script")
 
         insert_lc_load_dylib(binpath)
 

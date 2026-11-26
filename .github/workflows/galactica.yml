@@ -16,46 +16,40 @@ on:
         description: "Original IPA URL"
         required: false
         default: "https://github.com/Aoggs13/ggs/releases/download/fforig/com.dts.freefireth_1.132.1_und3fined.ipa"
-      gadget_url:
-        description: "Frida gadget universal dylib (gz) URL"
-        required: false
-        default: "https://github.com/frida/frida/releases/download/17.27.2/frida-gadget-17.27.2-ios-universal.dylib.gz"
 
 env:
   RELEASE_TAG: ${{ github.event.inputs.release_tag || 'galactica' }}
   ORIG_IPA_URL: ${{ github.event.inputs.orig_ipa_url || 'https://github.com/Aoggs13/ggs/releases/download/fforig/com.dts.freefireth_1.132.1_und3fined.ipa' }}
-  GADGET_URL: ${{ github.event.inputs.gadget_url || 'https://github.com/frida/frida/releases/download/17.27.2/frida-gadget-17.27.2-ios-universal.dylib.gz' }}
 
 permissions:
   contents: write
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Build native tweak
+        working-directory: galactica/native
+        run: |
+          # macOS runner already has Xcode + iphoneos SDK via xcrun
+          brew install ldid 2>/dev/null || true
+          make all
+          ls -lh libnativeunity.dylib
 
       - name: Download original IPA
         run: |
           curl -fL -o orig.ipa "$ORIG_IPA_URL"
           ls -lh orig.ipa
 
-      - name: Download Frida gadget
-        run: |
-          curl -fL -o gadget.dylib.gz "$GADGET_URL"
-          gunzip gadget.dylib.gz
-          mv gadget.dylib libnativeunity.dylib
-          ls -lh libnativeunity.dylib
-
       - name: Patch IPA
         run: |
           python3 galactica/patch_ipa.py orig.ipa galactica.ipa \
-            --gadget libnativeunity.dylib \
-            --config galactica/libnativeunity.config.json \
-            --script galactica/ff.js \
+            --gadget galactica/native/libnativeunity.dylib \
             --compress 6
           ls -lh galactica.ipa
-          sha256sum galactica.ipa | tee galactica.sha256
+          shasum -a 256 galactica.ipa | tee galactica.sha256
 
       - name: Delete old release (if exists)
         continue-on-error: true
