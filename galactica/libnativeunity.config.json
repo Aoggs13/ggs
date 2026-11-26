@@ -1,0 +1,8 @@
+{
+    "interaction": {
+        "type": "script",
+        "path": "@executable_path/ff.js",
+        "on_change": "reload"
+    },
+    "runtime": "qjs"
+}

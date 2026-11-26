@@ -1,0 +1,88 @@
+name: Galactica Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag"
+        required: false
+        default: "galactica"
+      orig_ipa_url:
+        description: "Original IPA URL"
+        required: false
+        default: "https://github.com/Aoggs13/ggs/releases/download/fforig/com.dts.freefireth_1.132.1_und3fined.ipa"
+      gadget_url:
+        description: "Frida gadget universal dylib (gz) URL"
+        required: false
+        default: "https://github.com/frida/frida/releases/download/16.5.9/frida-gadget-16.5.9-ios-universal.dylib.gz"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download original IPA
+        run: |
+          curl -fL -o orig.ipa "${{ github.event.inputs.orig_ipa_url }}"
+          ls -lh orig.ipa
+
+      - name: Download Frida gadget
+        run: |
+          curl -fL -o gadget.dylib.gz "${{ github.event.inputs.gadget_url }}"
+          gunzip gadget.dylib.gz
+          mv gadget.dylib libnativeunity.dylib
+          ls -lh libnativeunity.dylib
+
+      - name: Patch IPA
+        run: |
+          python3 galactica/patch_ipa.py orig.ipa galactica.ipa \
+            --gadget libnativeunity.dylib \
+            --config galactica/libnativeunity.config.json \
+            --script galactica/ff.js \
+            --compress 6
+          ls -lh galactica.ipa
+          sha256sum galactica.ipa | tee galactica.sha256
+
+      - name: Delete old release (if exists)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete "${{ github.event.inputs.release_tag }}" --yes --cleanup-tag || true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          name: Galactica — Free Fire iOS mod
+          body: |
+            ## Galactica
+
+            In-game Unity-canvas mod menu for Free Fire iOS 1.132.1 (`com.dts.freefireth`).
+
+            **features**
+            - Aimbot (silent / legit / snap), FOV 0–367°, no-indicator option, shot prediction
+            - ESP: box · name · HP bar · distance · bone lines · skeleton
+            - No recoil · no spread · no bullet drop · instant hit
+            - Auto Headshot
+            - DataDome kill · AppsFlyer sanity bypass · FBSDK integrity bypass
+            - JB-probe silencer (stat/fopen/access/_dyld/sysctl)
+            - Anti-hack auto-stub (grows at runtime — rescans every 5 s)
+            - BAN capture — logs opcode + args + stack to `Documents/ban-trace.log`
+            - Guest Reset (built-in ResetGuest + FixDeviceID + keychain wipe)
+
+            **install**
+            - **TrollStore** — AirDrop / Files → Install (preferred; no revokes)
+            - **Sideloadly** — Apple ID (free: 7 d / 3 app limit; paid dev: 1 y / 10 devices)
+            - **ESign / Scarlet** — enterprise cert (revoke-prone)
+
+            **how to open menu** — tap bottom-left corner of screen once.
+
+            **ban-trace** — copy `/var/mobile/Containers/Data/Application/<GUID>/Documents/ban-trace.log` via Filza / Files sharing after a ban event.
+          files: |
+            galactica.ipa
+            galactica.sha256
