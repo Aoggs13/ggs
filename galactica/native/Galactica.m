@@ -17,7 +17,7 @@
 
 // ====================== CFG (runtime-mutable) ======================
 typedef struct {
-    bool aimOn, noRecoil, noSpread, espOn;
+    bool aimOn, noRecoil, noSpread, noBulletDrop, instantHit, espOn;
     bool antiBanStub, hideJB, humanize, telemetryBlock;
     float fovDeg;        // 0..367
     float smoothing;     // 0..0.95
@@ -30,7 +30,8 @@ typedef struct {
 } GalCfg;
 
 static GalCfg CFG = {
-    .aimOn = false, .noRecoil = false, .noSpread = false, .espOn = false,
+    .aimOn = false, .noRecoil = false, .noSpread = false,
+    .noBulletDrop = false, .instantHit = false, .espOn = false,
     // Anti-ban defaults ON — Phase 1 ships protection enabled from first launch
     .antiBanStub = true, .hideJB = true, .humanize = true, .telemetryBlock = true,
     .fovDeg = 90, .smoothing = 0.25f, .accuracyCap = 0.72f,
@@ -51,6 +52,7 @@ typedef struct MethodInfo     MethodInfo;
 typedef struct Il2CppObject   Il2CppObject;
 typedef struct Il2CppString   Il2CppString;
 
+typedef struct Il2CppType     Il2CppType;
 typedef Il2CppDomain*   (*fn_domain_get_t)(void);
 typedef const Il2CppAssembly** (*fn_domain_get_assemblies_t)(const Il2CppDomain*, size_t*);
 typedef const Il2CppImage*     (*fn_assembly_get_image_t)(const Il2CppAssembly*);
@@ -65,6 +67,8 @@ typedef Il2CppString*          (*fn_string_new_t)(const char*);
 typedef Il2CppObject*          (*fn_runtime_invoke_t)(const MethodInfo*, void*, void**, void**);
 typedef size_t                 (*fn_image_get_class_count_t)(const Il2CppImage*);
 typedef Il2CppClass*           (*fn_image_get_class_t)(const Il2CppImage*, size_t);
+typedef const Il2CppType*      (*fn_method_get_return_type_t)(const MethodInfo*);
+typedef char*                  (*fn_type_get_name_t)(const Il2CppType*);
 
 static struct {
     bool resolved;
@@ -82,6 +86,8 @@ static struct {
     fn_runtime_invoke_t          runtime_invoke;
     fn_image_get_class_count_t   image_get_class_count;
     fn_image_get_class_t         image_get_class;
+    fn_method_get_return_type_t  method_get_return_type;
+    fn_type_get_name_t           type_get_name;
 } IL2 = {0};
 
 static bool resolve_il2cpp(void) {
@@ -101,6 +107,8 @@ static bool resolve_il2cpp(void) {
     R(runtime_invoke);
     R(image_get_class_count);
     R(image_get_class);
+    R(method_get_return_type);
+    R(type_get_name);
     #undef R
     IL2.resolved = (IL2.domain_get != NULL);
     if (IL2.resolved) LOG(@"IL2CPP resolved via dlsym");
@@ -138,11 +146,35 @@ static const Il2CppImage *il2_find_image(const char *name) {
     return NULL;
 }
 
-// Phase 2 — generic replacement stubs for stubbing integrity/security methods.
-// IL2CPP boolean-returning methods: a managed `bool` is an int (0 or 1) in native.
-static bool il2_stub_return_true(void *self)  { return true;  }
-static bool il2_stub_return_false(void *self) { return false; }
-static void il2_stub_return_void(void *self)  { }
+// Phase 2 — generic replacement stubs. IL2CPP booleans are int; voids return nothing;
+// floats return 0.0f; int returns 0. Vector3 / struct returns NOT touched (ABI-complex).
+static bool    il2_stub_return_true (void *self) { return true;  }
+static bool    il2_stub_return_false(void *self) { return false; }
+static void    il2_stub_return_void (void *self) { }
+static int32_t il2_stub_return_zero_i(void *self){ return 0; }
+static float   il2_stub_return_zero_f(void *self){ return 0.0f; }
+static float   il2_stub_return_big_f (void *self){ return 99999.0f; }
+static double  il2_stub_return_zero_d(void *self){ return 0.0; }
+
+// Pick a safe stub based on managed return type. Returns NULL if return type is complex
+// (struct, Vector3, object) — we skip those to stay crash-free.
+static void *stub_for_method(const MethodInfo *m, bool use_big_float) {
+    if (!IL2.method_get_return_type || !IL2.type_get_name) return (void *)il2_stub_return_false;
+    const Il2CppType *t = IL2.method_get_return_type(m);
+    if (!t) return (void *)il2_stub_return_false;
+    char *tn = IL2.type_get_name(t);
+    if (!tn) return (void *)il2_stub_return_false;
+    void *stub = NULL;
+    if      (strstr(tn, "Void"))    stub = (void *)il2_stub_return_void;
+    else if (strstr(tn, "Boolean")) stub = (void *)il2_stub_return_false;
+    else if (strstr(tn, "Single"))  stub = (void *)(use_big_float ? il2_stub_return_big_f : il2_stub_return_zero_f);
+    else if (strstr(tn, "Double"))  stub = (void *)il2_stub_return_zero_d;
+    else if (strstr(tn, "Int"))     stub = (void *)il2_stub_return_zero_i;
+    else if (strstr(tn, "UInt"))    stub = (void *)il2_stub_return_zero_i;
+    // Vector3, Quaternion, structs, objects — skip (NULL)
+    free(tn);
+    return stub;
+}
 
 // Scan Assembly-CSharp for security-looking classes and stub their BOOL methods.
 // Target: classes named AntiHack, GameSecurity, SecurityManager, IntegrityCheck,
@@ -187,6 +219,84 @@ static int il2_auto_stub_security(void) {
     }
     LOG(@"IL2CPP auto-stub done: %d methods in %zu classes scanned", stubbed, count);
     return stubbed;
+}
+
+// Generic: walk every class in `imageName` matching classRx, every method matching methodRx,
+// patch methodPointer with a safe return-type-correct stub. Returns count patched.
+static int il2_patch_matching(const char *imageName,
+                              NSRegularExpression *classRx,
+                              NSRegularExpression *methodRx,
+                              bool use_big_float, const char *tag) {
+    if (!IL2.resolved) return 0;
+    const Il2CppImage *img = il2_find_image(imageName);
+    if (!img || !IL2.image_get_class_count || !IL2.image_get_class) return 0;
+
+    size_t cc = IL2.image_get_class_count(img);
+    int patched = 0;
+    for (size_t i = 0; i < cc; i++) {
+        Il2CppClass *k = IL2.image_get_class(img, i);
+        if (!k) continue;
+        const char *cn = IL2.class_get_name(k);
+        if (!cn) continue;
+        NSString *cns = @(cn);
+        NSRange cnr = NSMakeRange(0, cns.length);
+        if ([classRx numberOfMatchesInString:cns options:0 range:cnr] == 0) continue;
+
+        void *iter = NULL;
+        const MethodInfo *m;
+        while ((m = IL2.class_get_methods(k, &iter))) {
+            const char *mn = IL2.method_get_name(m);
+            if (!mn) continue;
+            NSString *mns = @(mn);
+            NSRange mnr = NSMakeRange(0, mns.length);
+            if ([methodRx numberOfMatchesInString:mns options:0 range:mnr] == 0) continue;
+
+            void *stub = stub_for_method(m, use_big_float);
+            if (!stub) continue;  // complex return type — skip safely
+            if (il2_patch_method_ptr(m, stub)) {
+                patched++;
+                LOG(@"%s: %s.%s", tag, cn, mn);
+            }
+        }
+    }
+    LOG(@"%s — patched %d methods", tag, patched);
+    return patched;
+}
+
+static NSRegularExpression *rx(NSString *pattern) {
+    return [NSRegularExpression regularExpressionWithPattern:pattern
+                                                      options:NSRegularExpressionCaseInsensitive
+                                                        error:nil];
+}
+
+// ====================== gameplay patchers (callable per feature toggle) ======================
+static int il2_patch_no_recoil(void) {
+    return il2_patch_matching("Assembly-CSharp.dll",
+        rx(@"(WeaponFire|Weapon$|.*Weapon.*Controller)"),
+        rx(@"Recoil.*(Get|Apply|Calc|Update)|GetRecoil|ApplyRecoil"),
+        false, "noRecoil");
+}
+
+static int il2_patch_no_spread(void) {
+    return il2_patch_matching("Assembly-CSharp.dll",
+        rx(@"(WeaponFire|Weapon$|.*Weapon.*Controller|BulletCtrl|Bullet$)"),
+        rx(@"(Spread|Accuracy|Cone).*(Get|Calc)|CalcBulletDirection|GetSpreadAngle"),
+        false, "noSpread");
+}
+
+static int il2_patch_no_bullet_drop(void) {
+    return il2_patch_matching("Assembly-CSharp.dll",
+        rx(@"(Bullet|Projectile|Weapon).*"),
+        rx(@"(Gravity|Drop|ApplyGravity|BulletDrop).*(Get|Calc|Apply|Update)"),
+        false, "noDrop");
+}
+
+static int il2_patch_instant_hit(void) {
+    return il2_patch_matching("Assembly-CSharp.dll",
+        rx(@"(Bullet|Projectile|Weapon).*"),
+        rx(@"(BulletSpeed|InitSpeed|GetBulletSpeed|get_speed|ProjectileSpeed)"),
+        true,  // use big float for speed
+        "instantHit");
 }
 
 // Call an IL2CPP method by name (no-args). Used by Guest Reset for FixDeviceID / ResetGuest.
@@ -651,16 +761,17 @@ static IMP orig_alertShow = NULL;
     [self buildToggleRow:page y:y label:@"Predict shot" soon:YES
                   getter:^BOOL{ return YES; } setter:^(BOOL v){}];
     y += 38;
-    [self buildToggleRow:page y:y label:@"No Recoil · SOON" soon:YES
+    [self buildToggleRow:page y:y label:@"No Recoil" soon:NO
                   getter:^BOOL{ return CFG.noRecoil; }
-                  setter:^(BOOL v){ CFG.noRecoil = v; [wself refreshHooks]; }];
+                  setter:^(BOOL v){ CFG.noRecoil = v; if (v) il2_patch_no_recoil(); }];
     y += 38;
-    [self buildToggleRow:page y:y label:@"No Spread · SOON" soon:YES
+    [self buildToggleRow:page y:y label:@"No Spread" soon:NO
                   getter:^BOOL{ return CFG.noSpread; }
-                  setter:^(BOOL v){ CFG.noSpread = v; [wself refreshHooks]; }];
+                  setter:^(BOOL v){ CFG.noSpread = v; if (v) il2_patch_no_spread(); }];
     y += 38;
-    [self buildToggleRow:page y:y label:@"No Bullet Drop · SOON" soon:YES
-                  getter:^BOOL{ return NO; } setter:^(BOOL v){}];
+    [self buildToggleRow:page y:y label:@"No Bullet Drop" soon:NO
+                  getter:^BOOL{ return CFG.noBulletDrop; }
+                  setter:^(BOOL v){ CFG.noBulletDrop = v; if (v) il2_patch_no_bullet_drop(); }];
     y += 38;
     [self buildToggleRow:page y:y label:@"Humanize (anti-shadowban)" soon:NO
                   getter:^BOOL{ return CFG.humanize; }
@@ -762,8 +873,9 @@ static IMP orig_alertShow = NULL;
     [self buildToggleRow:page y:y label:@"Auto Headshot · SOON" soon:YES
                   getter:^BOOL{ return NO; } setter:^(BOOL v){}];
     y += 38;
-    [self buildToggleRow:page y:y label:@"Instant Hit · SOON" soon:YES
-                  getter:^BOOL{ return NO; } setter:^(BOOL v){}];
+    [self buildToggleRow:page y:y label:@"Instant Hit" soon:NO
+                  getter:^BOOL{ return CFG.instantHit; }
+                  setter:^(BOOL v){ CFG.instantHit = v; if (v) il2_patch_instant_hit(); }];
     y += 38;
     [self buildButtonRow:page y:y label:@"Guest Reset" btnLabel:@"RUN" soon:NO action:^{
         [wself runGuestReset];
@@ -774,7 +886,9 @@ static IMP orig_alertShow = NULL;
 }
 
 - (void)runGuestReset {
-    // 1) Wipe NSUserDefaults
+    // Safe wipe path — no IL2CPP invocation (risky for instance methods), no exit().
+    // After the toast fires, user force-closes and reopens for the fresh register.
+
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     NSDictionary *all = [ud dictionaryRepresentation];
     int wiped = 0;
@@ -792,10 +906,8 @@ static IMP orig_alertShow = NULL;
     }
     [ud synchronize];
 
-    // 2) Full Keychain wipe
     int kc = wipe_keychain();
 
-    // 3) Nuke Library/Preferences/ and Library/Caches/*
     NSFileManager *fm = [NSFileManager defaultManager];
     NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES);
     int fsWiped = 0;
@@ -816,45 +928,8 @@ static IMP orig_alertShow = NULL;
         }
     }
 
-    // 4) Call IL2CPP reset methods if available
-    int il2Calls = 0;
-    if (IL2.resolved) {
-        const char *methods[] = { "ResetGuest", "resetGuest", "MigrateGuest",
-                                  "FixDeviceID", "GetGOPDeviceID", "RefreshDeviceId",
-                                  NULL };
-        // Try every class whose name contains Guest/Login/Account/Device
-        const Il2CppImage *csharp = il2_find_image("Assembly-CSharp.dll");
-        if (csharp && IL2.image_get_class_count && IL2.image_get_class) {
-            size_t cc = IL2.image_get_class_count(csharp);
-            for (size_t i = 0; i < cc; i++) {
-                Il2CppClass *k = IL2.image_get_class(csharp, i);
-                if (!k) continue;
-                const char *cn = IL2.class_get_name(k);
-                if (!cn) continue;
-                NSString *csn = @(cn);
-                if (![csn containsString:@"Guest"] && ![csn containsString:@"Login"] &&
-                    ![csn containsString:@"Account"] && ![csn containsString:@"Device"]) continue;
-                for (int j = 0; methods[j]; j++) {
-                    const MethodInfo *m = IL2.class_get_method_from_name(k, methods[j], 0);
-                    if (!m) continue;
-                    void *exc = NULL;
-                    @try { IL2.runtime_invoke(m, NULL, NULL, &exc); il2Calls++;
-                        LOG(@"invoked %s.%s", cn, methods[j]); }
-                    @catch (NSException *e) { LOG(@"invoke fail: %@", e); }
-                }
-            }
-        }
-    }
-
-    LOG(@"guest reset — %d UD, %d kc, %d fs, %d il2 calls", wiped, kc, fsWiped, il2Calls);
-    [self showToast:[NSString stringWithFormat:@"✓ %d/%d/%d", wiped, kc, il2Calls]];
-
-    // 5) After 1.5s, terminate the app so it re-registers as a fresh install on next launch.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        LOG(@"terminating for clean guest re-register");
-        exit(0);
-    });
+    LOG(@"guest reset — %d UD keys, %d kc classes, %d fs items", wiped, kc, fsWiped);
+    [self showToast:[NSString stringWithFormat:@"✓ wiped — restart app"]];
 }
 
 - (void)showToast:(NSString *)msg {
@@ -922,10 +997,17 @@ static IMP orig_alertShow = NULL;
 }
 
 - (void)refreshHooks {
-    // Phase 1: when CFG toggles flip, (re)install any hooks that are now needed.
-    // Phase 2: wire the IL2CPP method hooks here.
-    if (CFG.hideJB) { patch_datadome(); patch_appsflyer(); }
+    // ObjC side
+    if (CFG.hideJB)      { patch_datadome(); patch_appsflyer(); }
     if (CFG.antiBanStub) { auto_stub_security_classes(); }
+
+    // IL2CPP side — re-patch on toggle (patches are idempotent if methodPointer
+    // is already our stub, vm_protect + memcpy just rewrites the same bytes).
+    if (IL2.resolved) {
+        if (CFG.noRecoil)     il2_patch_no_recoil();
+        if (CFG.noSpread)     il2_patch_no_spread();
+        if (CFG.noBulletDrop) il2_patch_no_bullet_drop();
+    }
 }
 
 // Helper: wrap a block in an object that responds to -invoke:
