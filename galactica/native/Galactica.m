@@ -22,6 +22,7 @@
 typedef struct {
     bool aimOn, noRecoil, noSpread, noBulletDrop, instantHit, espOn;
     bool speedHack, jumpHack, flyMode, maxHealth, wideHitbox, oneShot;
+    bool godMode, noFall, infAmmo, alwaysSprint, zoomIn;
     bool antiBanStub, hideJB, humanize, telemetryBlock;
     float fovDeg;        // 0..367
     float smoothing;     // 0..0.95
@@ -38,6 +39,8 @@ static GalCfg CFG = {
     .noBulletDrop = false, .instantHit = false, .espOn = false,
     .speedHack = false, .jumpHack = false, .flyMode = false,
     .maxHealth = false, .wideHitbox = false, .oneShot = false,
+    .godMode = false, .noFall = false, .infAmmo = false,
+    .alwaysSprint = false, .zoomIn = false,
     // Anti-ban defaults ON — Phase 1 ships protection enabled from first launch
     .antiBanStub = true, .hideJB = true, .humanize = true, .telemetryBlock = true,
     .fovDeg = 90, .smoothing = 0.25f, .accuracyCap = 0.72f,
@@ -355,6 +358,83 @@ static int il2_patch_one_shot(void) {
         rx(@"(Weapon.*|Damage.*|.*Bullet.*|.*Hit.*)"),
         rx(@"(GetDamage|CalcDamage|BaseDamage|get_damage|GetDmg|ComputeDamage)"),
         true, "oneShot");
+}
+
+static int il2_patch_god_mode(void) {
+    return il2_patch_matching("Assembly-CSharp.dll",
+        rx(@"(Player.*|.*Health.*|.*HP.*|.*Damage.*Receiver.*)"),
+        rx(@"(TakeDamage|ReceiveDamage|ApplyDamage|OnDamage|OnHit|HitByDamage)"),
+        false, "godMode");
+}
+
+static int il2_patch_no_fall(void) {
+    return il2_patch_matching("Assembly-CSharp.dll",
+        rx(@"(Player.*|.*Health.*|.*Fall.*)"),
+        rx(@"(TakeFallDamage|CalcFallDamage|OnFall|FallDamage|CheckFall)"),
+        false, "noFall");
+}
+
+static int il2_patch_infinite_ammo(void) {
+    return il2_patch_matching("Assembly-CSharp.dll",
+        rx(@"(Weapon.*|Ammo.*|.*Magazine.*|.*Clip.*)"),
+        rx(@"(UseAmmo|ConsumeAmmo|DecreaseAmmo|SpendAmmo|get_ammo)"),
+        true, "infAmmo");
+}
+
+static int il2_patch_always_sprint(void) {
+    return il2_patch_matching_true("Assembly-CSharp.dll",
+        rx(@"(Player.*|.*Movement.*|.*Character.*|.*Motor.*|.*Sprint.*)"),
+        rx(@"(IsSprinting|get_isSprinting|CanSprint|get_canSprint)"),
+        "alwaysSprint");
+}
+
+static int il2_patch_zoom_in(void) {
+    // Camera.set_fieldOfView and any FOV getter — set to 10°
+    return il2_patch_matching("UnityEngine.CoreModule.dll",
+        rx(@"Camera$"),
+        rx(@"(get_fieldOfView|GetFOV)"),
+        false, "zoomIn");  // uses zero_float stub — fieldOfView of 0 = narrow zoom
+}
+
+// True-returning variant of the generic pattern patcher for IsSprinting etc.
+static int il2_patch_matching_true(const char *imageName,
+                                   NSRegularExpression *classRx,
+                                   NSRegularExpression *methodRx,
+                                   const char *tag) {
+    if (!IL2.resolved) return 0;
+    const Il2CppImage *img = il2_find_image(imageName);
+    if (!img || !IL2.image_get_class_count) return 0;
+    size_t cc = IL2.image_get_class_count(img);
+    int patched = 0;
+    for (size_t i = 0; i < cc; i++) {
+        Il2CppClass *k = IL2.image_get_class(img, i);
+        if (!k) continue;
+        const char *cn = IL2.class_get_name(k);
+        if (!cn) continue;
+        NSString *cns = @(cn);
+        if ([classRx numberOfMatchesInString:cns options:0 range:NSMakeRange(0, cns.length)] == 0) continue;
+        void *iter = NULL;
+        const MethodInfo *m;
+        while ((m = IL2.class_get_methods(k, &iter))) {
+            const char *mn = IL2.method_get_name(m);
+            if (!mn) continue;
+            NSString *mns = @(mn);
+            if ([methodRx numberOfMatchesInString:mns options:0 range:NSMakeRange(0, mns.length)] == 0) continue;
+            // Only touch Boolean-return methods
+            if (!IL2.method_get_return_type || !IL2.type_get_name) continue;
+            const Il2CppType *t = IL2.method_get_return_type(m);
+            char *tn = IL2.type_get_name(t);
+            bool isBool = tn && strstr(tn, "Boolean");
+            free(tn);
+            if (!isBool) continue;
+            if (il2_patch_method_ptr(m, (void *)il2_stub_return_true)) {
+                patched++;
+                LOG(@"%s: %s.%s -> true", tag, cn, mn);
+            }
+        }
+    }
+    LOG(@"%s — patched %d bool methods", tag, patched);
+    return patched;
 }
 
 // Call an IL2CPP method by name (no-args). Used by Guest Reset for FixDeviceID / ResetGuest.
@@ -834,6 +914,26 @@ static IMP orig_alertShow = NULL;
     [self buildToggleRow:page y:y label:@"Max Health boost" soon:NO
                   getter:^BOOL{ return CFG.maxHealth; }
                   setter:^(BOOL v){ CFG.maxHealth = v; if (v) il2_patch_max_health(); }];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"God Mode" soon:NO
+                  getter:^BOOL{ return CFG.godMode; }
+                  setter:^(BOOL v){ CFG.godMode = v; if (v) il2_patch_god_mode(); }];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"No Fall Damage" soon:NO
+                  getter:^BOOL{ return CFG.noFall; }
+                  setter:^(BOOL v){ CFG.noFall = v; if (v) il2_patch_no_fall(); }];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Unlimited Ammo" soon:NO
+                  getter:^BOOL{ return CFG.infAmmo; }
+                  setter:^(BOOL v){ CFG.infAmmo = v; if (v) il2_patch_infinite_ammo(); }];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Always Sprint" soon:NO
+                  getter:^BOOL{ return CFG.alwaysSprint; }
+                  setter:^(BOOL v){ CFG.alwaysSprint = v; if (v) il2_patch_always_sprint(); }];
+    y += 38;
+    [self buildToggleRow:page y:y label:@"Zoom In (FOV→0)" soon:NO
+                  getter:^BOOL{ return CFG.zoomIn; }
+                  setter:^(BOOL v){ CFG.zoomIn = v; if (v) il2_patch_zoom_in(); }];
     y += 38;
     [self buildToggleRow:page y:y label:@"Humanize (anti-shadowban)" soon:NO
                   getter:^BOOL{ return CFG.humanize; }
