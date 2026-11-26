@@ -260,7 +260,9 @@ static IMP orig_alertShow = NULL;
 @implementation GalPassthroughWindow
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
-    return (hit == self.rootViewController.view) ? nil : hit;
+    // Only our actual controls claim touches; window + root view = empty space -> let FF have it
+    if (hit == nil || hit == self || hit == self.rootViewController.view) return nil;
+    return hit;
 }
 @end
 
