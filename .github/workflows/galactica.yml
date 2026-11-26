@@ -1,6 +1,11 @@
 name: Galactica Build
 
 on:
+  push:
+    branches: [claude/serene-edison-xmfbql]
+    paths:
+      - "galactica/**"
+      - ".github/workflows/galactica.yml"
   workflow_dispatch:
     inputs:
       release_tag:
@@ -16,6 +21,11 @@ on:
         required: false
         default: "https://github.com/frida/frida/releases/download/16.5.9/frida-gadget-16.5.9-ios-universal.dylib.gz"
 
+env:
+  RELEASE_TAG: ${{ github.event.inputs.release_tag || 'galactica' }}
+  ORIG_IPA_URL: ${{ github.event.inputs.orig_ipa_url || 'https://github.com/Aoggs13/ggs/releases/download/fforig/com.dts.freefireth_1.132.1_und3fined.ipa' }}
+  GADGET_URL: ${{ github.event.inputs.gadget_url || 'https://github.com/frida/frida/releases/download/16.5.9/frida-gadget-16.5.9-ios-universal.dylib.gz' }}
+
 permissions:
   contents: write
 
@@ -27,12 +37,12 @@ jobs:
 
       - name: Download original IPA
         run: |
-          curl -fL -o orig.ipa "${{ github.event.inputs.orig_ipa_url }}"
+          curl -fL -o orig.ipa "$ORIG_IPA_URL"
           ls -lh orig.ipa
 
       - name: Download Frida gadget
         run: |
-          curl -fL -o gadget.dylib.gz "${{ github.event.inputs.gadget_url }}"
+          curl -fL -o gadget.dylib.gz "$GADGET_URL"
           gunzip gadget.dylib.gz
           mv gadget.dylib libnativeunity.dylib
           ls -lh libnativeunity.dylib
@@ -52,12 +62,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete "${{ github.event.inputs.release_tag }}" --yes --cleanup-tag || true
+          gh release delete "$RELEASE_TAG" --yes --cleanup-tag || true
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag }}
+          tag_name: ${{ env.RELEASE_TAG }}
           name: Galactica — Free Fire iOS mod
           body: |
             ## Galactica
