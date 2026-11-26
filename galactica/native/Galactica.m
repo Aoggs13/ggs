@@ -241,6 +241,29 @@ static IMP orig_alertShow = NULL;
 - (void)invoke:(id)sender;
 @end
 
+// ====================== passthrough view — touches fall through to the game except on our controls ======================
+@interface GalPassthroughView : UIView
+@end
+
+@implementation GalPassthroughView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    // If the hit landed on *us* (empty space on the overlay), return nil so touch falls through
+    return (hit == self) ? nil : hit;
+}
+@end
+
+// ====================== passthrough window — same idea at window level ======================
+@interface GalPassthroughWindow : UIWindow
+@end
+
+@implementation GalPassthroughWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return (hit == self.rootViewController.view) ? nil : hit;
+}
+@end
+
 // ====================== menu (UIKit) ======================
 @interface GalacticaMenu : NSObject
 @property (strong, nonatomic) UIWindow *window;
@@ -281,40 +304,41 @@ static IMP orig_alertShow = NULL;
     UIWindowScene *scene = [self activeScene];
     if (!scene) { LOG(@"no window scene yet, will retry"); return; }
 
-    UIWindow *w = [[UIWindow alloc] initWithWindowScene:scene];
+    GalPassthroughWindow *w = [[GalPassthroughWindow alloc] initWithWindowScene:scene];
     w.windowLevel = UIWindowLevelStatusBar + 1000;
-    w.rootViewController = [[UIViewController alloc] init];
-    w.rootViewController.view.backgroundColor = [UIColor clearColor];
+    UIViewController *vc = [[UIViewController alloc] init];
+    // Swap the root VC's view for our passthrough view so empty taps go to the game
+    GalPassthroughView *rootView = [[GalPassthroughView alloc] initWithFrame:w.bounds];
+    rootView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    rootView.backgroundColor = [UIColor clearColor];
+    vc.view = rootView;
+    w.rootViewController = vc;
     w.backgroundColor = [UIColor clearColor];
     w.hidden = NO;
     self.window = w;
 
-    UIView *root = w.rootViewController.view;
+    UIView *root = vc.view;
 
-    // Floating open button
+    // Floating open button — small, top-left, draggable
     UIButton *fab = [UIButton buttonWithType:UIButtonTypeCustom];
-    fab.frame = CGRectMake(20, root.bounds.size.height - 90, 54, 54);
-    fab.autoresizingMask = UIViewAutoresizingFlexibleTopMargin;
-    fab.backgroundColor = [self hueColor:0.6 b:0.9 a:0.92];
-    fab.layer.cornerRadius = 27;
+    fab.frame = CGRectMake(14, 60, 38, 38);
+    fab.backgroundColor = [self hueColor:0.6 b:0.9 a:0.78];
+    fab.layer.cornerRadius = 19;
     fab.layer.shadowColor = [UIColor blackColor].CGColor;
-    fab.layer.shadowOpacity = 0.4;
-    fab.layer.shadowRadius = 8;
-    fab.layer.shadowOffset = CGSizeMake(0, 4);
+    fab.layer.shadowOpacity = 0.35;
+    fab.layer.shadowRadius = 5;
+    fab.layer.shadowOffset = CGSizeMake(0, 2);
     [fab setTitle:@"G" forState:UIControlStateNormal];
-    fab.titleLabel.font = [UIFont systemFontOfSize:24 weight:UIFontWeightBold];
+    fab.titleLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
     [fab setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     [fab addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
+    UIPanGestureRecognizer *fabPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragView:)];
+    [fab addGestureRecognizer:fabPan];
     [root addSubview:fab];
     self.fab = fab;
 
-    // Panel
-    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 560)];
-    panel.center = CGPointMake(root.bounds.size.width / 2, root.bounds.size.height / 2);
-    panel.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin |
-                             UIViewAutoresizingFlexibleRightMargin |
-                             UIViewAutoresizingFlexibleTopMargin |
-                             UIViewAutoresizingFlexibleBottomMargin;
+    // Panel — anchored to top-left under the FAB
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(14, 110, 300, 420)];
     panel.backgroundColor = [self hueColor:0.75 b:0.10 a:CFG.opacity];
     panel.layer.cornerRadius = 18;
     panel.layer.borderColor = [[self hueColor:0.5 b:0.7 a:0.3] CGColor];
@@ -368,6 +392,14 @@ static IMP orig_alertShow = NULL;
     title.layer.masksToBounds = NO;
     [panel addSubview:title];
     self.titleLabel = title;
+
+    // Drag by the title bar
+    UIView *dragHandle = [[UIView alloc] initWithFrame:CGRectMake(0, 0, panel.bounds.size.width, 52)];
+    dragHandle.backgroundColor = [UIColor clearColor];
+    dragHandle.userInteractionEnabled = YES;
+    UIPanGestureRecognizer *panelPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragPanel:)];
+    [dragHandle addGestureRecognizer:panelPan];
+    [panel addSubview:dragHandle];
 
     // Tabs
     self.tabButtons = [NSMutableArray array];
@@ -443,13 +475,6 @@ static IMP orig_alertShow = NULL;
     [self buildToggleRow:page y:y label:@"Humanize (anti-shadowban)"
                   getter:^BOOL{ return CFG.humanize; }
                   setter:^(BOOL v){ CFG.humanize = v; }];
-
-    UILabel *note = [[UILabel alloc] initWithFrame:CGRectMake(12, y + 60, page.bounds.size.width - 24, 200)];
-    note.numberOfLines = 0;
-    note.text = @"Phase 1: IL2CPP hooks enabled per toggle when gameplay classes become reachable. Watch logs for status.";
-    note.font = [UIFont systemFontOfSize:10];
-    note.textColor = [UIColor colorWithRed:0.6 green:0.7 blue:0.9 alpha:0.9];
-    [page addSubview:note];
 }
 
 - (void)buildEspPage:(UIView *)page {
@@ -457,12 +482,6 @@ static IMP orig_alertShow = NULL;
     [self buildToggleRow:page y:4 label:@"ESP master"
                   getter:^BOOL{ return CFG.espOn; }
                   setter:^(BOOL v){ CFG.espOn = v; [wself refreshHooks]; }];
-    UILabel *note = [[UILabel alloc] initWithFrame:CGRectMake(12, 60, page.bounds.size.width - 24, 200)];
-    note.numberOfLines = 0;
-    note.text = @"ESP overlay renders once PlayerController class resolves. Phase 1 just surfaces the toggle.";
-    note.font = [UIFont systemFontOfSize:10];
-    note.textColor = [UIColor colorWithRed:0.6 green:0.7 blue:0.9 alpha:0.9];
-    [page addSubview:note];
 }
 
 - (void)buildSettingsPage:(UIView *)page {
@@ -489,15 +508,6 @@ static IMP orig_alertShow = NULL;
     guestBtn.layer.cornerRadius = 7;
     [guestBtn addTarget:self action:@selector(runGuestReset) forControlEvents:UIControlEventTouchUpInside];
     [page addSubview:guestBtn];
-
-    UILabel *note = [[UILabel alloc] initWithFrame:CGRectMake(12, 164, page.bounds.size.width - 24, 200)];
-    note.numberOfLines = 0;
-    note.text = @"Phase 1 build — plain .dylib, no Frida. "
-                 "Launch-crash on iOS 27 beta is gone. "
-                 "IL2CPP hooks ship in Phase 2.";
-    note.font = [UIFont systemFontOfSize:10];
-    note.textColor = [UIColor colorWithRed:0.6 green:0.7 blue:0.9 alpha:0.9];
-    [page addSubview:note];
 }
 
 - (void)runGuestReset {
@@ -543,6 +553,20 @@ static IMP orig_alertShow = NULL;
 }
 
 - (void)tabTapped:(UIButton *)sender { [self switchTab:sender.tag]; }
+
+- (void)dragView:(UIPanGestureRecognizer *)g {
+    UIView *v = g.view;
+    CGPoint t = [g translationInView:v.superview];
+    v.center = CGPointMake(v.center.x + t.x, v.center.y + t.y);
+    [g setTranslation:CGPointZero inView:v.superview];
+}
+
+- (void)dragPanel:(UIPanGestureRecognizer *)g {
+    UIView *target = self.panel;
+    CGPoint t = [g translationInView:target.superview];
+    target.center = CGPointMake(target.center.x + t.x, target.center.y + t.y);
+    [g setTranslation:CGPointZero inView:target.superview];
+}
 
 - (void)switchTab:(NSInteger)idx {
     CFG.currentTab = (int)idx;
