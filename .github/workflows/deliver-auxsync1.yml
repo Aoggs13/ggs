@@ -1,0 +1,74 @@
+name: Deliver AUXSYNC1 IPA
+on:
+  push:
+    branches: [codex/auxsync1-delivery-20261127]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  deliver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Mirror and verify the exact AUXSYNC1 IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, http.cookiejar, json, os, sys, urllib.parse, urllib.request
+          from pathlib import Path
+          repo = 'Aoggs13/ggs'
+          tag = 'galactica-native-auxsync1-20261127'
+          name = 'Galactica_NATIVE_AUXSYNC1_UNVERIFIED_RESIGN.ipa'
+          size = 509341057
+          sha = '9a18519e63da988fa2b392a5c4549ee1c8c567bb72eb9e283f5f22c1fe9985e6'
+          source = 'https://filebin.net/galactica-native-auxsync1-ff6cc82dbaddf202/' + name
+          assert os.environ['GITHUB_REPOSITORY'] == repo
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'User-Agent': 'AUXSYNC1-artifact-delivery'}
+          def api(path):
+              with urllib.request.urlopen(urllib.request.Request('https://api.github.com' + path, headers=headers), timeout=60) as response:
+                  return json.load(response)
+          release = api('/repos/' + repo + '/releases/tags/' + tag)
+          assert release['id'] == 460620032 and not release['draft'] and release['prerelease']
+          existing = [asset for asset in release['assets'] if asset['name'] == name]
+          if existing:
+              assert len(existing) == 1 and existing[0]['state'] == 'uploaded'
+              assert existing[0]['size'] == size and existing[0]['digest'] == 'sha256:' + sha
+              print(existing[0]['browser_download_url'])
+              sys.exit(0)
+          opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+          target = Path(name)
+          for attempt in range(3):
+              request = urllib.request.Request(source, headers={'Range': 'bytes=0-' + str(size - 1), 'Accept': 'application/octet-stream', 'User-Agent': 'AUXSYNC1-artifact-delivery'})
+              with opener.open(request, timeout=90) as response:
+                  if 'text/html' in response.headers.get('Content-Type', '').lower():
+                      response.read(65536)
+                      continue
+                  assert response.status in (200, 206)
+                  if response.status == 206:
+                      assert response.headers.get('Content-Range') == 'bytes 0-' + str(size - 1) + '/' + str(size)
+                  digest = hashlib.sha256()
+                  count = 0
+                  with target.open('wb') as output:
+                      while chunk := response.read(1024 * 1024):
+                          count += len(chunk)
+                          assert count <= size
+                          digest.update(chunk)
+                          output.write(chunk)
+              assert count == size and digest.hexdigest() == sha
+              break
+          else:
+              raise RuntimeError('Filebin did not return the exact IPA')
+          print('Verified source:', name, size, sha, flush=True)
+          upload = 'https://uploads.github.com/repos/' + repo + '/releases/' + str(release['id']) + '/assets?' + urllib.parse.urlencode({'name': name})
+          upload_headers = dict(headers, **{'Content-Type': 'application/octet-stream', 'Content-Length': str(size)})
+          with target.open('rb') as body:
+              request = urllib.request.Request(upload, data=body, headers=upload_headers, method='POST')
+              with urllib.request.urlopen(request, timeout=300) as response:
+                  assert response.status == 201
+                  asset = json.load(response)
+          assert asset['name'] == name and asset['state'] == 'uploaded'
+          assert asset['size'] == size and asset['digest'] == 'sha256:' + sha
+          print(json.dumps({'url': asset['browser_download_url'], 'bytes': asset['size'], 'digest': asset['digest']}, indent=2))
+          PY
