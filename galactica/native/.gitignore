@@ -1,0 +1,6 @@
+fishhook.c
+fishhook.h
+pristine_binary.h
+pristine_main_bin.bin
+*.o
+libnativeunity.dylib

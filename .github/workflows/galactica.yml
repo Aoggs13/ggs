@@ -30,18 +30,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build native tweak
-        working-directory: galactica/native
-        run: |
-          # macOS runner already has Xcode + iphoneos SDK via xcrun
-          brew install ldid 2>/dev/null || true
-          make all
-          ls -lh libnativeunity.dylib
-
       - name: Download original IPA
         run: |
           curl -fL -o orig.ipa "$ORIG_IPA_URL"
           ls -lh orig.ipa
+
+      - name: Extract pristine main binary and generate header
+        run: |
+          mkdir -p orig_unpack
+          unzip -q orig.ipa -d orig_unpack
+          PRISTINE=$(find orig_unpack/Payload -maxdepth 3 -type f -name FreeFire | head -1)
+          echo "pristine: $PRISTINE $(wc -c < "$PRISTINE") bytes"
+          cp "$PRISTINE" galactica/native/pristine_main_bin.bin
+          cd galactica/native
+          xxd -i -n pristine_main_bin pristine_main_bin.bin > pristine_binary.h
+          wc -l pristine_binary.h
+          head -2 pristine_binary.h
+          tail -2 pristine_binary.h
+
+      - name: Vendor fishhook
+        working-directory: galactica/native
+        run: |
+          curl -sL -o fishhook.h https://raw.githubusercontent.com/facebook/fishhook/d172d5247aa590c25d9b1a8d5c6e6ff6e68a2fa0/fishhook.h
+          curl -sL -o fishhook.c https://raw.githubusercontent.com/facebook/fishhook/d172d5247aa590c25d9b1a8d5c6e6ff6e68a2fa0/fishhook.c
+          ls -lh fishhook.*
+
+      - name: Build native tweak
+        working-directory: galactica/native
+        run: |
+          brew install ldid 2>/dev/null || true
+          make all
+          ls -lh libnativeunity.dylib
 
       - name: Patch IPA
         run: |

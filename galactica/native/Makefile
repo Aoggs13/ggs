@@ -19,8 +19,9 @@ LDFLAGS   := -isysroot $(SDK) -target $(TARGET) -arch arm64 \
              -framework Security \
              -lobjc
 
-SRCS      := Galactica.m
-OBJS      := $(SRCS:.m=.o)
+OBJC_SRCS := Galactica.m
+C_SRCS    := file_spoof.c fishhook.c
+OBJS      := $(OBJC_SRCS:.m=.o) $(C_SRCS:.c=.o)
 OUTPUT    := libnativeunity.dylib
 
 .PHONY: all clean sign
@@ -32,6 +33,9 @@ $(OUTPUT): $(OBJS)
 
 %.o: %.m
 	$(CLANG) $(CFLAGS) -c $< -o $@
+
+%.o: %.c
+	$(CLANG) $(CFLAGS) -fno-objc-arc -c $< -o $@
 
 sign: $(OUTPUT)
 	@# Ad-hoc codesign so dyld on iOS doesn't reject on load path. TrollStore/
