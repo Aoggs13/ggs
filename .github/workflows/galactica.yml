@@ -20,11 +20,16 @@ on:
         description: "Base IPA URL — the already-modded build we add anti-ban into"
         required: false
         default: "https://github.com/Aoggs13/ggs/releases/download/galactica-native-phase2f-20261127/Galactica_NATIVE_PHASE2F_UNVERIFIED_RESIGN.ipa"
+      fluck_ipa_url:
+        description: "ZIP containing Fluck.framework"
+        required: false
+        default: "https://github.com/Aoggs13/ggs/releases/download/%D0%B3%D0%B3%D1%81/Free.Fire_1.132.1.ipa.zip"
 
 env:
   RELEASE_TAG: ${{ github.event.inputs.release_tag || 'galactica' }}
   ORIG_IPA_URL: ${{ github.event.inputs.orig_ipa_url || 'https://github.com/Aoggs13/ggs/releases/download/fforig/com.dts.freefireth_1.132.1_und3fined.ipa' }}
   BASE_IPA_URL: ${{ github.event.inputs.base_ipa_url || 'https://github.com/Aoggs13/ggs/releases/download/galactica-native-phase2f-20261127/Galactica_NATIVE_PHASE2F_UNVERIFIED_RESIGN.ipa' }}
+  FLUCK_IPA_URL: ${{ github.event.inputs.fluck_ipa_url || 'https://github.com/Aoggs13/ggs/releases/download/%D0%B3%D0%B3%D1%81/Free.Fire_1.132.1.ipa.zip' }}
 
 permissions:
   contents: write
@@ -35,11 +40,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download pristine + base IPAs
+      - name: Download pristine + base + fluck
         run: |
-          curl -fL -o orig.ipa "$ORIG_IPA_URL"
-          curl -fL -o base.ipa "$BASE_IPA_URL"
-          ls -lh orig.ipa base.ipa
+          curl -fL -o orig.ipa  "$ORIG_IPA_URL"
+          curl -fL -o base.ipa  "$BASE_IPA_URL"
+          curl -fL -o fluck.zip "$FLUCK_IPA_URL"
+          ls -lh orig.ipa base.ipa fluck.zip
+
+      - name: Extract Fluck.framework
+        run: |
+          mkdir -p fluck_unpack
+          unzip -q fluck.zip -d fluck_unpack
+          FLUCK=$(find fluck_unpack -maxdepth 6 -type d -name Fluck.framework | head -1)
+          echo "found: $FLUCK"
+          cp -R "$FLUCK" Fluck.framework
+          ls -la Fluck.framework/
 
       - name: Extract pristine main binary and generate header
         run: |
@@ -67,10 +82,11 @@ jobs:
           make all
           ls -lh libnativeunity.dylib
 
-      - name: Patch IPA — inject anti-ban dylib + rename app to "Free Fire"
+      - name: Patch IPA — our file-spoof dylib + Fluck.framework + rename "Free Fire"
         run: |
           python3 galactica/patch_ipa.py base.ipa galactica.ipa \
             --gadget galactica/native/libnativeunity.dylib \
+            --extra-framework Fluck.framework \
             --display-name "Free Fire" \
             --compress 6
           ls -lh galactica.ipa

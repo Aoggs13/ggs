@@ -67,7 +67,12 @@ def strip_strings(path):
     open(path, "wb").write(bytes(d))
     log(f"stripped {hits} debug-string occurrences")
 
-def insert_lc_load_dylib(binpath):
+def insert_lc_load_dylib(binpath, inject_path=None):
+    if inject_path is None:
+        inject_path = DYLIB_INJECT_PATH
+    if isinstance(inject_path, str):
+        inject_path = inject_path.encode()
+
     d = bytearray(open(binpath, "rb").read())
     magic, _, _, _, ncmds, sizeofcmds, _, _ = struct.unpack("<IIIIIIII", d[:32])
     if magic != 0xfeedfacf:
@@ -89,15 +94,15 @@ def insert_lc_load_dylib(binpath):
                         text_start = off
                     sc += 80
         elif cmd == LC_LOAD_DYLIB or cmd == LC_LOAD_WEAK_DYLIB:
-            if bytes(d[cursor+24:cursor+size]).split(b"\x00", 1)[0] == DYLIB_INJECT_PATH:
+            if bytes(d[cursor+24:cursor+size]).split(b"\x00", 1)[0] == inject_path:
                 already = True
         cursor += size
 
     if already:
-        log("LC_LOAD_DYLIB already present")
+        log(f"LC_LOAD already present: {inject_path.decode()}")
         return
 
-    path_bytes = DYLIB_INJECT_PATH + b"\x00"
+    path_bytes = inject_path + b"\x00"
     total = 24 + len(path_bytes)
     pad = (8 - (total % 8)) % 8
     total += pad
@@ -110,7 +115,7 @@ def insert_lc_load_dylib(binpath):
     d[cmd_blob_end:cmd_blob_end+total] = new_cmd
     struct.pack_into("<II", d, 16, ncmds + 1, sizeofcmds + total)
     open(binpath, "wb").write(bytes(d))
-    log(f"injected LC_LOAD_DYLIB → {DYLIB_INJECT_PATH.decode()}")
+    log(f"injected LC_LOAD_DYLIB → {inject_path.decode()}")
 
 def zip_dir(src_dir, dst_ipa, compresslevel=6):
     if os.path.exists(dst_ipa): os.remove(dst_ipa)
@@ -134,6 +139,9 @@ def main():
     ap.add_argument("--compress", type=int, default=6)
     ap.add_argument("--display-name", default=None,
                     help="override CFBundleDisplayName / CFBundleName in Info.plist")
+    ap.add_argument("--extra-framework", action="append", default=[],
+                    help="path to an extra .framework dir to copy into "
+                         "Frameworks/ and LC_LOAD_WEAK_DYLIB-link. Repeatable.")
     args = ap.parse_args()
 
     for p in (args.orig, args.gadget):
@@ -171,6 +179,20 @@ def main():
             log("copied Frida script")
 
         insert_lc_load_dylib(binpath)
+
+        for fw_src in args.extra_framework:
+            if not os.path.isdir(fw_src):
+                log(f"skip extra-framework (not a dir): {fw_src}")
+                continue
+            fw_name = os.path.basename(fw_src.rstrip("/"))      # e.g. "Fluck.framework"
+            fw_dst = os.path.join(fw, fw_name)
+            if os.path.isdir(fw_dst):
+                shutil.rmtree(fw_dst)
+            shutil.copytree(fw_src, fw_dst)
+            inner = fw_name.rsplit(".framework", 1)[0]
+            inject_path = f"@executable_path/Frameworks/{fw_name}/{inner}"
+            insert_lc_load_dylib(binpath, inject_path)
+            log(f"extra framework installed: {fw_name}")
 
         if args.display_name:
             info["CFBundleDisplayName"] = args.display_name
