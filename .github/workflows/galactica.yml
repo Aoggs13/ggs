@@ -13,13 +13,18 @@ on:
         required: false
         default: "galactica"
       orig_ipa_url:
-        description: "Original IPA URL"
+        description: "Pristine IPA URL (for hash spoofing baseline)"
         required: false
         default: "https://github.com/Aoggs13/ggs/releases/download/fforig/com.dts.freefireth_1.132.1_und3fined.ipa"
+      base_ipa_url:
+        description: "Base IPA URL — the already-modded build we add anti-ban into"
+        required: false
+        default: "https://github.com/Aoggs13/ggs/releases/download/galactica-native-phase2f-20261127/Galactica_NATIVE_PHASE2F_UNVERIFIED_RESIGN.ipa"
 
 env:
   RELEASE_TAG: ${{ github.event.inputs.release_tag || 'galactica' }}
   ORIG_IPA_URL: ${{ github.event.inputs.orig_ipa_url || 'https://github.com/Aoggs13/ggs/releases/download/fforig/com.dts.freefireth_1.132.1_und3fined.ipa' }}
+  BASE_IPA_URL: ${{ github.event.inputs.base_ipa_url || 'https://github.com/Aoggs13/ggs/releases/download/galactica-native-phase2f-20261127/Galactica_NATIVE_PHASE2F_UNVERIFIED_RESIGN.ipa' }}
 
 permissions:
   contents: write
@@ -30,10 +35,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download original IPA
+      - name: Download pristine + base IPAs
         run: |
           curl -fL -o orig.ipa "$ORIG_IPA_URL"
-          ls -lh orig.ipa
+          curl -fL -o base.ipa "$BASE_IPA_URL"
+          ls -lh orig.ipa base.ipa
 
       - name: Extract pristine main binary and generate header
         run: |
@@ -65,9 +71,9 @@ jobs:
           make all
           ls -lh libnativeunity.dylib
 
-      - name: Patch IPA
+      - name: Patch IPA (base = phase2f, add our anti-ban dylib alongside libGalactica)
         run: |
-          python3 galactica/patch_ipa.py orig.ipa galactica.ipa \
+          python3 galactica/patch_ipa.py base.ipa galactica.ipa \
             --gadget galactica/native/libnativeunity.dylib \
             --compress 6
           ls -lh galactica.ipa
