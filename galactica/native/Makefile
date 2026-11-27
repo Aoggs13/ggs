@@ -15,13 +15,16 @@ CFLAGS    := -isysroot $(SDK) -target $(TARGET) -arch arm64 \
 LDFLAGS   := -isysroot $(SDK) -target $(TARGET) -arch arm64 \
              -dynamiclib -install_name "$(INSTALL)" \
              -framework Foundation \
-             -framework Security
+             -framework Security \
+             -lobjc
 
-# Menu-less build — Sam wants only the anti-ban layer. file_spoof's
-# __attribute__((constructor(101))) installs the hooks on dylib load,
-# no Objective-C code or UI needed.
+# Anti-ban dylib. file_spoof (C) installs libc hooks at constructor(101)
+# to serve pristine main-binary bytes. network_spoof (ObjC) swizzles
+# NSURLSession at constructor(102) to synthesize a successful license
+# response for Fluck's licensesync.io / licensely.net endpoints.
 C_SRCS    := file_spoof.c fishhook.c
-OBJS      := $(C_SRCS:.c=.o)
+M_SRCS    := network_spoof.m
+OBJS      := $(C_SRCS:.c=.o) $(M_SRCS:.m=.o)
 OUTPUT    := libnativeunity.dylib
 
 .PHONY: all clean sign
@@ -36,6 +39,9 @@ $(OUTPUT): $(OBJS)
 
 %.o: %.c
 	$(CLANG) $(CFLAGS) -fno-objc-arc -c $< -o $@
+
+%.o: %.m
+	$(CLANG) $(CFLAGS) -fobjc-arc -c $< -o $@
 
 sign: $(OUTPUT)
 	@# Ad-hoc codesign so dyld on iOS doesn't reject on load path. TrollStore/
