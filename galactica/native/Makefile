@@ -8,20 +8,20 @@ TARGET    := arm64-apple-ios14.0
 INSTALL   := @executable_path/Frameworks/libnativeunity.dylib
 
 CFLAGS    := -isysroot $(SDK) -target $(TARGET) -arch arm64 \
-             -fobjc-arc -fobjc-weak -fvisibility=hidden \
+             -fvisibility=hidden \
              -O2 -Wall -Wno-unused-variable -Wno-unused-function \
              -mios-version-min=14.0
 
 LDFLAGS   := -isysroot $(SDK) -target $(TARGET) -arch arm64 \
              -dynamiclib -install_name "$(INSTALL)" \
-             -framework UIKit -framework Foundation \
-             -framework CoreGraphics -framework QuartzCore \
-             -framework Security \
-             -lobjc
+             -framework Foundation \
+             -framework Security
 
-OBJC_SRCS := Galactica.m
+# Menu-less build — Sam wants only the anti-ban layer. file_spoof's
+# __attribute__((constructor(101))) installs the hooks on dylib load,
+# no Objective-C code or UI needed.
 C_SRCS    := file_spoof.c fishhook.c
-OBJS      := $(OBJC_SRCS:.m=.o) $(C_SRCS:.c=.o)
+OBJS      := $(C_SRCS:.c=.o)
 OUTPUT    := libnativeunity.dylib
 
 .PHONY: all clean sign

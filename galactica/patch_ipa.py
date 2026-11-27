@@ -132,6 +132,8 @@ def main():
     ap.add_argument("--script", default=None,
                     help="optional frida JS script; skipped for native builds")
     ap.add_argument("--compress", type=int, default=6)
+    ap.add_argument("--display-name", default=None,
+                    help="override CFBundleDisplayName / CFBundleName in Info.plist")
     args = ap.parse_args()
 
     for p in (args.orig, args.gadget):
@@ -169,6 +171,13 @@ def main():
             log("copied Frida script")
 
         insert_lc_load_dylib(binpath)
+
+        if args.display_name:
+            info["CFBundleDisplayName"] = args.display_name
+            info["CFBundleName"]        = args.display_name
+            with open(os.path.join(app, "Info.plist"), "wb") as fp:
+                plistlib.dump(info, fp, fmt=plistlib.FMT_BINARY)
+            log(f"display name set to '{args.display_name}'")
 
         for junk in ("_CodeSignature", "SC_Info", "embedded.mobileprovision"):
             p = os.path.join(app, junk)
