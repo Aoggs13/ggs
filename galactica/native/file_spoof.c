@@ -29,8 +29,8 @@
 #define GAL_FD_MAX  32
 
 struct gal_fd_slot {
-    _Atomic int in_use;   // 0 = free, 1 = ours
-    off_t       offset;
+    volatile int in_use;  // 0 = free, 1 = ours (__atomic_* on plain int works on Clang)
+    off_t        offset;
 };
 
 static struct gal_fd_slot gal_fds[GAL_FD_MAX];
